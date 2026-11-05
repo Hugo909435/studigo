@@ -31,7 +31,7 @@ const store=createStore(resolve(base,env.DATA_DIR || 'data'));
 for(const name of readdirSync(store.media)) if(/^[a-f0-9-]{36}\.part$/.test(name)) unlinkSync(join(store.media,name));
 const sessions=new Map(); const loginAttempts=new Map(); const oauthStates=new Map();
 const locks=new Set();
-const box=vault(config.secret); const google=createGoogleClient(store,config); const worker=createWorker(store,createProviders(store,config),{locks});
+const box=vault(config.secret); const google=createGoogleClient(store,config); const worker=createWorker(store,createProviders(store,config),{locks,isEnabled:network=>network!=='youtube'||!!store.setting('google')&&!store.setting('youtubePaused')});
 const maxUpload=Number(env.MAX_UPLOAD_MB || 1024)*1024*1024;
 const maxStorage=Number(env.MAX_STORAGE_MB || 5120)*1024*1024;
 if (![maxUpload,maxStorage].every(n=>Number.isFinite(n)&&n>0)) throw new Error('Quotas invalides');
@@ -40,7 +40,7 @@ function fail(status,message) { throw Object.assign(new Error(message),{status})
 const equal=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
 function send(res,status,value) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 async function body(req) { let text=''; for await(const b of req) { text+=b; if(Buffer.byteLength(text)>65536) fail(413,'Requête trop grande'); } try { return JSON.parse(text); } catch { fail(400,'Données invalides'); } }
-function connected() { return { youtube:!!store.setting('google'), facebook:!!(config.bufferKey&&config.bufferFacebook || config.metaToken&&config.pageId), instagram:!!(config.bufferKey&&config.bufferInstagram || config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
+function connected() { return { youtube:!!store.setting('google')&&!store.setting('youtubePaused'), facebook:!!(config.bufferKey&&config.bufferFacebook || config.metaToken&&config.pageId), instagram:!!(config.bufferKey&&config.bufferInstagram || config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
 function publicPost(p) { const {media,...rest}=p; return {...rest,hasMedia:!!media}; }
 function owned(id) { const p=store.get(id); if(!p) fail(404,'Publication introuvable'); return p; }
 
@@ -78,11 +78,11 @@ const server=createServer(async(req,res)=>{
     if(path.startsWith('/api/') || path.startsWith('/auth/')) {
       if(!authenticated) fail(401,'Connexion requise');
       if(req.method==='POST' && path==='/api/logout') { sessions.delete(sid); res.setHeader('Set-Cookie','studio=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); return send(res,200,{ok:true}); }
-      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),bufferNetworks:{tiktok:!!(config.bufferKey&&config.bufferChannel),facebook:!!(config.bufferKey&&config.bufferFacebook),instagram:!!(config.bufferKey&&config.bufferInstagram)},googleConfigured:!!(config.googleId&&config.googleSecret),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
+      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),bufferNetworks:{tiktok:!!(config.bufferKey&&config.bufferChannel),facebook:!!(config.bufferKey&&config.bufferFacebook),instagram:!!(config.bufferKey&&config.bufferInstagram)},googleConfigured:!!(config.googleId&&config.googleSecret),youtubeChannel:store.setting('googleChannel') || null,youtubePending:store.setting('googlePending')?.expiresAt>Date.now()?store.setting('googlePending').channel:null,youtubePaused:!!store.setting('youtubePaused'),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
       if(req.method==='GET' && path==='/auth/youtube') {
         if(!config.googleId||!config.googleSecret) fail(409,'Configurer les identifiants Google sur le serveur');
         const state=randomBytes(24).toString('hex'); oauthStates.set(state,{sid,expires:Date.now()+600000});
-        const params=new URLSearchParams({client_id:config.googleId,redirect_uri:`${config.appUrl}/auth/youtube/callback`,response_type:'code',scope:'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl',access_type:'offline',prompt:'consent',state});
+        const params=new URLSearchParams({client_id:config.googleId,redirect_uri:`${config.appUrl}/auth/youtube/callback`,response_type:'code',scope:'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl',access_type:'offline',prompt:'select_account consent',state});
         res.writeHead(302,{Location:`https://accounts.google.com/o/oauth2/v2/auth?${params}`}); return res.end();
       }
       if(req.method==='GET' && path==='/auth/youtube/callback') {
@@ -90,7 +90,31 @@ const server=createServer(async(req,res)=>{
         if(!saved||saved.sid!==sid||saved.expires<Date.now()||!url.searchParams.get('code')) fail(400,'Autorisation expirée ou refusée');
         const tokens=await jsonFetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({client_id:config.googleId,client_secret:config.googleSecret,code:url.searchParams.get('code'),grant_type:'authorization_code',redirect_uri:`${config.appUrl}/auth/youtube/callback`})});
         if(!tokens.refresh_token) fail(400,'Autorisation hors ligne absente');
-        store.setting('google',box.encrypt({...tokens,expiresAt:Date.now()+tokens.expires_in*1000})); res.writeHead(302,{Location:'/'}); return res.end();
+        const identity=await jsonFetch('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',{headers:{Authorization:`Bearer ${tokens.access_token}`}});
+        if(identity.items?.length!==1 || !identity.items[0].id) fail(409,'Sélectionner une seule chaîne YouTube puis reconnecter');
+        const channel={id:identity.items[0].id,title:identity.items[0].snippet.title};
+        store.setting('googlePending',{tokens:box.encrypt({...tokens,expiresAt:Date.now()+tokens.expires_in*1000}),channel,expiresAt:Date.now()+600000});
+        store.setting('youtubePaused',true);store.setting('youtubePlaylists',[]);
+        res.writeHead(302,{Location:'/?youtube=confirm'}); return res.end();
+      }
+      if(req.method==='POST' && path==='/api/youtube/disconnect') {
+        store.setting('youtubePaused',true);store.setting('google',null);store.setting('googlePending',null);store.setting('googleChannel',null);store.setting('youtubePlaylists',[]);
+        const defaults=store.setting('defaults') || {};if(defaults.youtube){defaults.youtube.playlistIds=[];store.setting('defaults',defaults);}
+        return send(res,200,{ok:true});
+      }
+      if(req.method==='POST' && path==='/api/youtube/confirm') {
+        const data=await body(req),pending=store.setting('googlePending');
+        if(!pending || pending.expiresAt<Date.now() || data.channelId!==pending.channel.id) fail(409,'Confirmation de chaîne expirée ou incorrecte. Reconnecter YouTube.');
+        const previous=store.setting('googleChannel');
+        if(previous?.id!==pending.channel.id) {
+          for(const post of store.list()) {
+            const d=post.destinations.youtube;
+            if(d && d.state!=='delivered') {d.state='attention';d.error='Chaîne YouTube modifiée. Vérifier cette destination avant toute nouvelle publication.';store.save(post);}
+          }
+          const defaults=store.setting('defaults') || {};if(defaults.youtube){defaults.youtube.playlistIds=[];store.setting('defaults',defaults);}
+        }
+        store.setting('google',pending.tokens);store.setting('googleChannel',pending.channel);store.setting('googlePending',null);store.setting('youtubePlaylists',[]);store.setting('youtubePaused',false);
+        return send(res,200,{ok:true,channel:pending.channel});
       }
       if(req.method==='PUT' && path==='/api/preferences') {
         const data=await body(req);const defaults={};
@@ -172,7 +196,7 @@ const server=createServer(async(req,res)=>{
             if(network==='youtube' && plan.playlistIds.length && !google.canManagePlaylists()) fail(409,'Reconnecter YouTube dans Mes réseaux pour autoriser les playlists');
             if(network==='tiktok' && tiktokMode==='buffer' && (!ready.tiktok || typeof (input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
             const bufferTarget=network==='facebook'?config.bufferFacebook:network==='instagram'?config.bufferInstagram:null;
-            plans[network]={...plan,...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):bufferTarget&&config.bufferKey?{state:'pending',provider:'buffer',channelId:bufferTarget}:{state:'pending'})};
+            plans[network]={...plan,...(network==='youtube'&&store.setting('googleChannel')?{youtubeChannelId:store.setting('googleChannel').id}:{}),...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):bufferTarget&&config.bufferKey?{state:'pending',provider:'buffer',channelId:bufferTarget}:{state:'pending'})};
           }
           const earliest=Object.values(plans).map(d=>d.scheduledAt).sort()[0];
           p.title=typeof data.title==='string'&&data.title.trim()?data.title.trim().slice(0,100):Object.values(plans)[0].title;p.description=typeof data.description==='string'?data.description:'';p.scheduledAt=earliest;p.madeForKids=plans.youtube?.madeForKids ?? data.madeForKids ?? false;p.tiktokAiGenerated=plans.tiktok?.tiktokAiGenerated ?? false;p.status='scheduled';p.destinations=plans;store.save(p);

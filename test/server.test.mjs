@@ -78,7 +78,7 @@ test('création de playlist : une requête répétée ou ambiguë ne crée jamai
   const directory=await mkdtemp(join(tmpdir(),'studigo-playlists-'));const secret=randomBytes(32).toString('hex');
   const store=createStore(directory);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000,scope:'https://www.googleapis.com/auth/youtube.force-ssl'}));store.close();
   const preload=join(directory,'mock-google.mjs');
-  await writeFile(preload,`let calls=0;globalThis.fetch=async(url,options)=>{if(!String(url).endsWith('playlists?part=snippet,status')||options.method!=='POST')throw new Error('Unexpected request');calls++;const data=JSON.parse(options.body);if(data.snippet.title==='Ambigu')throw new Error('Lost response');return Response.json({id:'playlist-'+calls});};`);
+  await writeFile(preload,`let calls=0;globalThis.fetch=async(url,options)=>{if(String(url)==='https://oauth2.googleapis.com/token')return Response.json({access_token:'access-test',refresh_token:'refresh-test',expires_in:3600,scope:'https://www.googleapis.com/auth/youtube.force-ssl'});if(String(url).includes('channels?'))return Response.json({items:[{id:'UCtest',snippet:{title:'Ma chaîne de quiz'}}]});if(!String(url).endsWith('playlists?part=snippet,status')||options.method!=='POST')throw new Error('Unexpected request');calls++;const data=JSON.parse(options.body);if(data.snippet.title==='Ambigu')throw new Error('Lost response');return Response.json({id:'playlist-'+calls});};`);
   const port=45000+Math.floor(Math.random()*10000),origin=`http://127.0.0.1:${port}`,password=randomBytes(24).toString('hex');
   const proc=spawn(process.execPath,['--import',new URL(`file:///${preload.replaceAll('\\','/')}`).href,'server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,HOST:'127.0.0.1',PORT:String(port),APP_URL:origin,DATA_DIR:directory,ADMIN_PASSWORD:password,MEDIA_SECRET:secret,GOOGLE_CLIENT_ID:'test',GOOGLE_CLIENT_SECRET:'test',BUFFER_API_KEY:'',BUFFER_TIKTOK_CHANNEL_ID:'',BUFFER_FACEBOOK_CHANNEL_ID:'',BUFFER_INSTAGRAM_CHANNEL_ID:'',META_PAGE_ID:'',META_PAGE_TOKEN:'',INSTAGRAM_USER_ID:''},stdio:['ignore','pipe','pipe']});
   t.after(async()=>{proc.kill();await new Promise(r=>proc.exitCode!==null?r():proc.once('exit',r));await rm(directory,{recursive:true,force:true});});
@@ -91,4 +91,15 @@ test('création de playlist : une requête répétée ou ambiguë ne crée jamai
   const ambiguous={...data,requestId:'22222222-2222-4222-8222-222222222222',title:'Ambigu'};
   assert.equal((await create(ambiguous)).status,502);assert.equal((await create(ambiguous)).status,409);
   const third=await create({...data,requestId:'33333333-3333-4333-8333-333333333333'});assert.equal((await third.json()).id,'playlist-3');
+  const headers={Cookie:cookie,Origin:origin,'Content-Type':'application/json'};
+  const authorization=await fetch(origin+'/auth/youtube',{headers,redirect:'manual'});const consent=new URL(authorization.headers.get('location'));
+  assert.equal(consent.searchParams.get('prompt'),'select_account consent');
+  const callback=await fetch(origin+'/auth/youtube/callback?'+new URLSearchParams({state:consent.searchParams.get('state'),code:'test-code'}),{headers,redirect:'manual'});assert.equal(callback.status,302);
+  const pending=await (await fetch(origin+'/api/state',{headers})).json();assert.equal(pending.connections.youtube,false);assert.equal(pending.youtubePending.title,'Ma chaîne de quiz');assert.equal(pending.youtubePaused,true);assert.ok(!JSON.stringify(pending).includes('refresh-test'));
+  assert.equal((await fetch(origin+'/api/youtube/confirm',{method:'POST',headers,body:JSON.stringify({channelId:'wrong'})})).status,409);
+  const confirmed=await fetch(origin+'/api/youtube/confirm',{method:'POST',headers,body:JSON.stringify({channelId:'UCtest'})});assert.equal(confirmed.status,200);
+  const active=await (await fetch(origin+'/api/state',{headers})).json();assert.equal(active.connections.youtube,true);assert.equal(active.youtubeChannel.id,'UCtest');assert.equal(active.youtubePending,null);
+  assert.equal((await fetch(origin+'/api/youtube/disconnect',{method:'POST',headers,body:'{}'})).status,200);
+  const disconnected=await (await fetch(origin+'/api/state',{headers})).json();assert.equal(disconnected.connections.youtube,false);assert.deepEqual(disconnected.youtubePlaylists,[]);assert.equal(disconnected.youtubeChannel,null);
+
 });

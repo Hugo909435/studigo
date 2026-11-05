@@ -54,6 +54,8 @@ Après traitement YouTube, le classement dans les playlists est confirmé avant 
 
 ### YouTube
 
+La reconnexion affiche le sélecteur de compte Google puis demande une confirmation du nom et de l’identifiant de chaîne dans Mes réseaux. Les jetons restent en attente pendant 10 minutes, sans envoi YouTube, jusqu’à cette confirmation. Le bouton Déconnecter YouTube supprime la connexion locale et les playlists en cache. Les autres réseaux continuent de fonctionner. Les nouvelles destinations YouTube sont liées à l’identifiant de chaîne confirmé ; changer de chaîne ne réaffecte pas silencieusement les publications existantes.
+
 Créer un projet Google Cloud, activer YouTube Data API v3 et configurer l'écran de consentement OAuth ainsi qu'un client Web. Ajouter exactement `APP_URL/auth/youtube/callback` aux URI autorisées. Renseigner GOOGLE_CLIENT_ID et GOOGLE_CLIENT_SECRET dans `.env`, redémarrer, puis « Mes réseaux → Connecter ma chaîne ». Vérifier les exigences Google de consentement, quotas et durée de vie des jetons en mode test. L'option « Conçu pour les enfants » est demandée à chaque publication.
 
 ### TikTok via Buffer (optionnel)

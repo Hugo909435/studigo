@@ -199,3 +199,15 @@ test('les anciennes destinations Meta ne sont jamais basculées automatiquement 
   await createWorker(store,createProviders(store,{secret:'s'.repeat(32),bufferKey:'key',metaVersion:'v24.0',metaToken:'test',pageId:'page',instagramId:'ig'}))();
   assert.equal(calls,2);await access(file);
 });
+
+test('YouTube suspendu reste en attente sans appel distant pendant que les autres réseaux avancent',async t=>{
+  const {store,file}=await fixture(t,{youtube:{state:'pending'},facebook:{state:'pending'}});
+  const worker=createWorker(store,{youtube:async()=>assert.fail('YouTube ne doit pas partir'),facebook:async(p,d,save)=>{d.state='delivered';save();}},{isEnabled:network=>network!=='youtube'});
+  await worker();await worker();assert.equal(store.get('test').destinations.youtube.state,'pending');assert.equal(store.get('test').destinations.facebook.state,'delivered');await access(file);
+});
+
+test('une destination liée à une autre chaîne YouTube ne peut jamais être envoyée',async t=>{
+  const {store,file}=await fixture(t,{youtube:{state:'pending',youtubeChannelId:'UCprevious'}});store.setting('googleChannel',{id:'UCnew'});
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);globalThis.fetch=async()=>assert.fail('Aucun appel distant autorisé');
+  await createWorker(store,createProviders(store,{secret:'s'.repeat(32)}))();assert.equal(store.get('test').destinations.youtube.state,'attention');await access(file);
+});
