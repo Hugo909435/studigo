@@ -23,7 +23,7 @@ if (!env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length<16 || !env.MEDIA_SECRET || 
   }
   console.error(`Configuration de démarrage invalide. Fichier .env ${envFileLoaded?'chargé':'absent'} à côté de server.mjs.`); process.exit(1);
 }
-const config={secret:env.MEDIA_SECRET,appUrl:(env.APP_URL || 'http://127.0.0.1:4310').replace(/\/$/,''),googleId:env.GOOGLE_CLIENT_ID,googleSecret:env.GOOGLE_CLIENT_SECRET,metaVersion:env.META_GRAPH_VERSION || 'v24.0',metaToken:env.META_PAGE_TOKEN,pageId:env.META_PAGE_ID,instagramId:env.INSTAGRAM_USER_ID,bufferKey:env.BUFFER_API_KEY,bufferChannel:env.BUFFER_TIKTOK_CHANNEL_ID};
+const config={secret:env.MEDIA_SECRET,appUrl:(env.APP_URL || 'http://127.0.0.1:4310').replace(/\/$/,''),googleId:env.GOOGLE_CLIENT_ID,googleSecret:env.GOOGLE_CLIENT_SECRET,metaVersion:env.META_GRAPH_VERSION || 'v24.0',metaToken:env.META_PAGE_TOKEN,pageId:env.META_PAGE_ID,instagramId:env.INSTAGRAM_USER_ID,bufferKey:env.BUFFER_API_KEY,bufferChannel:env.BUFFER_TIKTOK_CHANNEL_ID,bufferFacebook:env.BUFFER_FACEBOOK_CHANNEL_ID,bufferInstagram:env.BUFFER_INSTAGRAM_CHANNEL_ID};
 const secure=new URL(config.appUrl).protocol==='https:';
 if (!secure && !['127.0.0.1','localhost'].includes(new URL(config.appUrl).hostname)) throw new Error('HTTPS requis hors localhost');
 const store=createStore(resolve(base,env.DATA_DIR || 'data'));
@@ -40,7 +40,7 @@ function fail(status,message) { throw Object.assign(new Error(message),{status})
 const equal=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
 function send(res,status,value) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 async function body(req) { let text=''; for await(const b of req) { text+=b; if(Buffer.byteLength(text)>65536) fail(413,'Requête trop grande'); } try { return JSON.parse(text); } catch { fail(400,'Données invalides'); } }
-function connected() { return { youtube:!!store.setting('google'), facebook:!!(config.metaToken&&config.pageId), instagram:!!(config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
+function connected() { return { youtube:!!store.setting('google'), facebook:!!(config.bufferKey&&config.bufferFacebook || config.metaToken&&config.pageId), instagram:!!(config.bufferKey&&config.bufferInstagram || config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
 function publicPost(p) { const {media,...rest}=p; return {...rest,hasMedia:!!media}; }
 function owned(id) { const p=store.get(id); if(!p) fail(404,'Publication introuvable'); return p; }
 
@@ -78,7 +78,7 @@ const server=createServer(async(req,res)=>{
     if(path.startsWith('/api/') || path.startsWith('/auth/')) {
       if(!authenticated) fail(401,'Connexion requise');
       if(req.method==='POST' && path==='/api/logout') { sessions.delete(sid); res.setHeader('Set-Cookie','studio=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); return send(res,200,{ok:true}); }
-      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),googleConfigured:!!(config.googleId&&config.googleSecret),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
+      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),bufferNetworks:{tiktok:!!(config.bufferKey&&config.bufferChannel),facebook:!!(config.bufferKey&&config.bufferFacebook),instagram:!!(config.bufferKey&&config.bufferInstagram)},googleConfigured:!!(config.googleId&&config.googleSecret),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
       if(req.method==='GET' && path==='/auth/youtube') {
         if(!config.googleId||!config.googleSecret) fail(409,'Configurer les identifiants Google sur le serveur');
         const state=randomBytes(24).toString('hex'); oauthStates.set(state,{sid,expires:Date.now()+600000});
@@ -171,7 +171,8 @@ const server=createServer(async(req,res)=>{
             const plan=destinationPlan(network,input,data);
             if(network==='youtube' && plan.playlistIds.length && !google.canManagePlaylists()) fail(409,'Reconnecter YouTube dans Mes réseaux pour autoriser les playlists');
             if(network==='tiktok' && tiktokMode==='buffer' && (!ready.tiktok || typeof (input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
-            plans[network]={...plan,...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):{state:'pending'})};
+            const bufferTarget=network==='facebook'?config.bufferFacebook:network==='instagram'?config.bufferInstagram:null;
+            plans[network]={...plan,...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):bufferTarget&&config.bufferKey?{state:'pending',provider:'buffer',channelId:bufferTarget}:{state:'pending'})};
           }
           const earliest=Object.values(plans).map(d=>d.scheduledAt).sort()[0];
           p.title=typeof data.title==='string'&&data.title.trim()?data.title.trim().slice(0,100):Object.values(plans)[0].title;p.description=typeof data.description==='string'?data.description:'';p.scheduledAt=earliest;p.madeForKids=plans.youtube?.madeForKids ?? data.madeForKids ?? false;p.tiktokAiGenerated=plans.tiktok?.tiktokAiGenerated ?? false;p.status='scheduled';p.destinations=plans;store.save(p);

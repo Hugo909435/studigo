@@ -64,6 +64,14 @@ Au créneau choisi, Studigo transmet une URL MP4 signée valable 24 heures à Bu
 
 Références : [API Buffer](https://developers.buffer.com/), [statuts de publication](https://developers.buffer.com/guides/posts-and-scheduling.html).
 
+### Facebook et Instagram via Buffer (option recommandée)
+
+Connecter une Page Facebook et un compte Instagram professionnel dans Buffer. Les variables `BUFFER_FACEBOOK_CHANNEL_ID` et `BUFFER_INSTAGRAM_CHANNEL_ID`, avec la clé `BUFFER_API_KEY` existante, activent les envois de Reels via Buffer sans application Meta propre à Studigo. Un compte Instagram personnel ne permet pas la publication automatique. La connexion Instagram directe dans Buffer ne nécessite pas de Page Facebook liée pour les Reels simples.
+
+Les nouvelles destinations Facebook/Instagram enregistrent le prestataire et le compte Buffer choisis. Les destinations anciennes conservent leur parcours Meta et ne sont pas réenvoyées ni migrées automatiquement. Comme pour TikTok, Studigo attend le créneau de chaque destination puis demande une publication immédiate de Reel. Il attend un statut `sent`, le bon compte/réseau, le mode `automatic` et un lien de publication cohérent avant de confirmer la réception. Une notification manuelle Buffer ne vaut jamais réception. Les résultats ambigus conservent le MP4 et ne sont pas relancés ; aucun repli automatique vers Meta.
+
+L’offre gratuite Buffer permet 3 comptes : TikTok, Facebook et Instagram. YouTube peut rester connecté directement à Studigo. Les médias sont conservés localement jusqu’aux créneaux respectifs, sans remplir à l’avance les files Buffer. Les quotas API et réseau restent applicables et Buffer conserve sa propre copie suivant ses conditions.
+
 ### Meta
 
 Créer/configurer une application Meta avec les droits de publication nécessaires. Pour le parcours Facebook Login retenu, prévoir notamment `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `instagram_basic`, `instagram_content_publish`, sous réserve des accès accordés à ton application.

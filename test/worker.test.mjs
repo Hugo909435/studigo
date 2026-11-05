@@ -161,3 +161,41 @@ test('YouTube : playlists paginées et autorisation supplémentaire détectée s
   const playlists=await google.playlists();assert.equal(playlists.length,2);assert.equal(calls,2);
   store.setting('google',box.encrypt({...tokens,scope:tokens.scope+' https://www.googleapis.com/auth/youtube.force-ssl'}));assert.equal(google.canManagePlaylists(),true);
 });
+
+test('Facebook et Instagram via Buffer : Reels et réception confirmée par le bon réseau avant suppression',async t=>{
+  for(const network of ['facebook','instagram']) await t.test(network,async t=>{
+    let now=Date.now();const {store,file}=await fixture(t,{[network]:{state:'pending',provider:'buffer',channelId:network+'-channel',title:'Titre propre',description:'Description propre'}});
+    const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let creates=0;
+    globalThis.fetch=async(url,options)=>{
+      assert.equal(url,'https://api.buffer.com');const request=JSON.parse(options.body);
+      if(request.query.includes('mutation')){
+        creates++;const input=request.variables.input;assert.equal(input.text,'Titre propre\n\nDescription propre');assert.equal(input.mode,'shareNow');assert.equal(input.metadata[network].type,'reel');
+        if(network==='instagram')assert.equal(input.metadata.instagram.shouldShareToFeed,true);
+        assert.equal(store.get('test').destinations[network].state,'publishing');
+        return Response.json({data:{createPost:{post:{id:'remote-'+network,channelId:network+'-channel'}}}});
+      }
+      return Response.json({data:{post:{id:'remote-'+network,channelId:network+'-channel',channelService:network,status:'sent',schedulingType:'automatic',externalLink:network==='instagram'?'https://www.instagram.com/reel/Abc123/':'https://www.facebook.com/reel/123456'}}});
+    };
+    const worker=createWorker(store,createProviders(store,{secret:'s'.repeat(32),bufferKey:'test-key',appUrl:'https://studio.example'},{now:()=>now}),{now:()=>now});
+    await worker();await access(file);assert.equal(store.get('test').destinations[network].state,'processing');
+    await worker();assert.equal(creates,1);now=store.get('test').destinations[network].nextPollAt;await worker();assert.equal(creates,1);await assert.rejects(access(file));
+  });
+});
+
+test('Buffer Meta : pas de réception sur notification, mauvais réseau ou mauvais lien, ni de repli Direct Post',async t=>{
+  for(const network of ['facebook','instagram']) for(const scenario of ['notification','wrong-service','wrong-url','timeout']) await t.test(network+' '+scenario,async t=>{
+    const now=Date.now();const {store,file}=await fixture(t,{[network]:{state:scenario==='timeout'?'pending':'processing',provider:'buffer',channelId:'channel',remoteId:'remote',mediaExpiresAt:now+86400000}});
+    const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let mutations=0;
+    globalThis.fetch=async(url,options)=>{assert.equal(url,'https://api.buffer.com');if(JSON.parse(options.body).query.includes('mutation')){mutations++;throw new Error('timeout');}return Response.json({data:{post:{id:'remote',channelId:'channel',channelService:scenario==='wrong-service'?'tiktok':network,status:'sent',schedulingType:scenario==='notification'?'notification':'automatic',externalLink:scenario==='wrong-url'?'https://evil.example/reel/123':network==='instagram'?'https://www.instagram.com/reel/Abc123/':'https://www.facebook.com/reel/123'}}});};
+    const worker=createWorker(store,createProviders(store,{secret:'s'.repeat(32),bufferKey:'key',appUrl:'https://studio.example'},{now:()=>now}));
+    await worker();await worker();assert.equal(store.get('test').destinations[network].state,'attention');assert.equal(mutations,scenario==='timeout'?1:0);await access(file);
+  });
+});
+
+test('les anciennes destinations Meta ne sont jamais basculées automatiquement vers Buffer',async t=>{
+  const {store,file}=await fixture(t,{facebook:{state:'pending'},instagram:{state:'pending'}});
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let calls=0;
+  globalThis.fetch=async url=>{calls++;assert.ok(String(url).startsWith('https://graph.facebook.com/'));return new Response('',{status:403});};
+  await createWorker(store,createProviders(store,{secret:'s'.repeat(32),bufferKey:'key',metaVersion:'v24.0',metaToken:'test',pageId:'page',instagramId:'ig'}))();
+  assert.equal(calls,2);await access(file);
+});
