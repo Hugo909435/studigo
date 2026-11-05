@@ -1,10 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, cp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+
+test('démarrage direct : charge .env à côté du serveur et conserve les variables du processus',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'studigo-env-'));
+  await cp(new URL('../server.mjs',import.meta.url),join(directory,'server.mjs'));
+  await cp(new URL('../lib',import.meta.url),join(directory,'lib'),{recursive:true});
+  const port=45000+Math.floor(Math.random()*10000),origin=`http://127.0.0.1:${port}`;
+  await writeFile(join(directory,'.env'),`ADMIN_PASSWORD=${randomBytes(24).toString('hex')}\nMEDIA_SECRET=${randomBytes(32).toString('hex')}\nAPP_URL=invalid\nDATA_DIR=./data\n`);
+  const env={...process.env,HOST:'127.0.0.1',PORT:String(port),APP_URL:origin};
+  for(const key of ['ADMIN_PASSWORD','MEDIA_SECRET','DATA_DIR']) delete env[key];
+  const proc=spawn(process.execPath,[join(directory,'server.mjs')],{env,stdio:['ignore','pipe','pipe']});
+  t.after(async()=>{proc.kill();await new Promise(r=>proc.exitCode!==null?r():proc.once('exit',r));await rm(directory,{recursive:true,force:true});});
+  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Serveur non démarré')),10000);proc.stdout.once('data',()=>{clearTimeout(timer);resolve();});proc.once('error',reject);proc.once('exit',code=>{clearTimeout(timer);reject(new Error(`Serveur arrêté : ${code}`));});});
+  const response=await fetch(`${origin}/health`);
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{ok:true});
+});
 
 test('parcours HTTP privé : import, calendrier, confirmation TikTok et suppression effective',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'cq-http-'));

@@ -5,12 +5,15 @@ import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadEnvFile } from 'node:process';
 import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { createStore } from './lib/store.mjs';
 import { createWorker, purgeDelivered } from './lib/worker.mjs';
 import { createProviders, vault, jsonFetch, mediaSignature } from './lib/providers.mjs';
 
 const base=dirname(fileURLToPath(import.meta.url));
+// Les hébergeurs peuvent lancer le fichier directement, sans passer par npm start.
+try { loadEnvFile(join(base,'.env')); } catch(e) { if(e.code!=='ENOENT') throw e; }
 const env=process.env;
 if (!env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length<16 || !env.MEDIA_SECRET || env.MEDIA_SECRET.length<32) {
   console.error('Configurer ADMIN_PASSWORD (16 caractères minimum) et MEDIA_SECRET (32 minimum) dans .env. Voir .env.example.'); process.exit(1);
