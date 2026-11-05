@@ -13,10 +13,14 @@ import { createProviders, vault, jsonFetch, mediaSignature } from './lib/provide
 
 const base=dirname(fileURLToPath(import.meta.url));
 // Les hébergeurs peuvent lancer le fichier directement, sans passer par npm start.
-try { loadEnvFile(join(base,'.env')); } catch(e) { if(e.code!=='ENOENT') throw e; }
+let envFileLoaded=false;
+try { loadEnvFile(join(base,'.env')); envFileLoaded=true; } catch(e) { if(e.code!=='ENOENT') throw e; }
 const env=process.env;
 if (!env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length<16 || !env.MEDIA_SECRET || env.MEDIA_SECRET.length<32) {
-  console.error('Configurer ADMIN_PASSWORD (16 caractères minimum) et MEDIA_SECRET (32 minimum) dans .env. Voir .env.example.'); process.exit(1);
+  for(const [key,min] of [['ADMIN_PASSWORD',16],['MEDIA_SECRET',32]]) {
+    if(!env[key] || env[key].length<min) console.error(`${key} : ${env[key]?'trop court':'absent'} (${env[key]?.length || 0} caractères ; minimum ${min}).`);
+  }
+  console.error(`Configuration de démarrage invalide. Fichier .env ${envFileLoaded?'chargé':'absent'} à côté de server.mjs.`); process.exit(1);
 }
 const config={secret:env.MEDIA_SECRET,appUrl:(env.APP_URL || 'http://127.0.0.1:4310').replace(/\/$/,''),googleId:env.GOOGLE_CLIENT_ID,googleSecret:env.GOOGLE_CLIENT_SECRET,metaVersion:env.META_GRAPH_VERSION || 'v24.0',metaToken:env.META_PAGE_TOKEN,pageId:env.META_PAGE_ID,instagramId:env.INSTAGRAM_USER_ID};
 const secure=new URL(config.appUrl).protocol==='https:';
