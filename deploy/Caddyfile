@@ -1,0 +1,4 @@
+# Remplacer ce sous-domaine par celui réellement créé dans le DNS.
+studio.quizzgenerale.com {
+  reverse_proxy 127.0.0.1:4310
+}

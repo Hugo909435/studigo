@@ -1,0 +1,19 @@
+services:
+  studio:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:4310:4310"
+    volumes:
+      - studio-data:/app/data
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"
+volumes:
+  studio-data:
