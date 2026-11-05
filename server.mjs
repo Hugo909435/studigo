@@ -22,7 +22,7 @@ if (!env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length<16 || !env.MEDIA_SECRET || 
   }
   console.error(`Configuration de démarrage invalide. Fichier .env ${envFileLoaded?'chargé':'absent'} à côté de server.mjs.`); process.exit(1);
 }
-const config={secret:env.MEDIA_SECRET,appUrl:(env.APP_URL || 'http://127.0.0.1:4310').replace(/\/$/,''),googleId:env.GOOGLE_CLIENT_ID,googleSecret:env.GOOGLE_CLIENT_SECRET,metaVersion:env.META_GRAPH_VERSION || 'v24.0',metaToken:env.META_PAGE_TOKEN,pageId:env.META_PAGE_ID,instagramId:env.INSTAGRAM_USER_ID};
+const config={secret:env.MEDIA_SECRET,appUrl:(env.APP_URL || 'http://127.0.0.1:4310').replace(/\/$/,''),googleId:env.GOOGLE_CLIENT_ID,googleSecret:env.GOOGLE_CLIENT_SECRET,metaVersion:env.META_GRAPH_VERSION || 'v24.0',metaToken:env.META_PAGE_TOKEN,pageId:env.META_PAGE_ID,instagramId:env.INSTAGRAM_USER_ID,bufferKey:env.BUFFER_API_KEY,bufferChannel:env.BUFFER_TIKTOK_CHANNEL_ID};
 const secure=new URL(config.appUrl).protocol==='https:';
 if (!secure && !['127.0.0.1','localhost'].includes(new URL(config.appUrl).hostname)) throw new Error('HTTPS requis hors localhost');
 const store=createStore(resolve(base,env.DATA_DIR || 'data'));
@@ -39,7 +39,7 @@ function fail(status,message) { throw Object.assign(new Error(message),{status})
 const equal=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
 function send(res,status,value) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 async function body(req) { let text=''; for await(const b of req) { text+=b; if(Buffer.byteLength(text)>65536) fail(413,'Requête trop grande'); } try { return JSON.parse(text); } catch { fail(400,'Données invalides'); } }
-function connected() { return { youtube:!!store.setting('google'), facebook:!!(config.metaToken&&config.pageId), instagram:!!(config.metaToken&&config.instagramId), tiktok:false }; }
+function connected() { return { youtube:!!store.setting('google'), facebook:!!(config.metaToken&&config.pageId), instagram:!!(config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
 function publicPost(p) { const {media,...rest}=p; return {...rest,hasMedia:!!media}; }
 function owned(id) { const p=store.get(id); if(!p) fail(404,'Publication introuvable'); return p; }
 
@@ -52,9 +52,10 @@ const server=createServer(async(req,res)=>{
   try {
     const url=new URL(req.url,config.appUrl); const path=url.pathname;
     if (req.method==='GET' && path==='/health') return send(res,200,{ok:true});
-    // Seul le fichier signé est accessible aux robots Meta, sans ouvrir le tableau de bord.
-    if (req.method==='GET' && /^\/media\/[a-f0-9-]+$/.test(path)) {
-      const id=path.split('/')[2], expires=Number(url.searchParams.get('expires'));
+    // Seul le fichier signé est accessible à Meta et Buffer, sans ouvrir le tableau de bord.
+    const signedMedia=path.match(/^\/media\/([a-f0-9-]+)(?:\.mp4)?$/);
+    if (['GET','HEAD'].includes(req.method) && signedMedia) {
+      const id=signedMedia[1], expires=Number(url.searchParams.get('expires'));
       if(!Number.isFinite(expires)||expires<Date.now()||expires>Date.now()+25*3600000||!equal(url.searchParams.get('signature') || '',mediaSignature(config.secret,id,expires))) fail(403,'Lien expiré');
       return await streamMedia(req,res,owned(id));
     }
@@ -131,7 +132,10 @@ const server=createServer(async(req,res)=>{
           if(typeof data.madeForKids!=='boolean') fail(400,'Indiquer si la vidéo est conçue pour les enfants');
           if(!Array.isArray(data.networks)||!data.networks.length||data.networks.some(n=>!['youtube','facebook','instagram','tiktok'].includes(n))) fail(400,'Choisir au moins un réseau');
           const ready=connected(); if(data.networks.some(n=>n!=='tiktok'&&!ready[n])) fail(409,'Configurer les comptes sélectionnés avant la programmation');
-          p.title=data.title.trim(); p.description=data.description; p.scheduledAt=date.toISOString(); p.madeForKids=data.madeForKids; p.status='scheduled'; p.destinations=Object.fromEntries([...new Set(data.networks)].map(n=>[n,{state:n==='tiktok'?'manual':'pending'}])); store.save(p);
+          const tiktokMode=data.tiktokMode || 'manual';
+          if(!['manual','buffer'].includes(tiktokMode)) fail(400,'Mode TikTok invalide');
+          if(data.networks.includes('tiktok') && tiktokMode==='buffer' && (!ready.tiktok || typeof data.tiktokAiGenerated!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
+          p.title=data.title.trim(); p.description=data.description; p.scheduledAt=date.toISOString(); p.madeForKids=data.madeForKids; p.tiktokAiGenerated=data.tiktokAiGenerated===true; p.status='scheduled'; p.destinations=Object.fromEntries([...new Set(data.networks)].map(n=>[n,n==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):{state:'pending'}])); store.save(p);
           return send(res,200,publicPost(p));
         }
         if(req.method==='POST' && action==='confirm') {
@@ -163,6 +167,7 @@ async function streamMedia(req,res,p,download=false) {
   let start=0,end=size-1,status=200;
   if(req.headers.range) { const m=/^bytes=(\d+)-(\d*)$/.exec(req.headers.range); if(!m) fail(416,'Plage invalide'); start=Number(m[1]); end=m[2]?Number(m[2]):end; if(start>end||end>=size) fail(416,'Plage invalide'); status=206; }
   res.writeHead(status,{'Content-Type':'video/mp4','Accept-Ranges':'bytes','Content-Length':end-start+1,...(status===206?{'Content-Range':`bytes ${start}-${end}/${size}`} : {}),...(download?{'Content-Disposition':`attachment; filename="studigo-${p.id}.mp4"`}:{})});
+  if(req.method==='HEAD') { res.end(); return; }
   await pipeline(createReadStream(file,{start,end}),res);
 }
 server.requestTimeout=30*60*1000;

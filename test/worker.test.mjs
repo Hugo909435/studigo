@@ -60,3 +60,58 @@ test('YouTube envoie la programmation et attend le traitement avant de confirmer
   await providers.youtube(p,d,()=>store.save(p));assert.equal(d.state,'processing');
   await providers.youtube(p,d,()=>store.save(p));assert.equal(d.state,'delivered');assert.equal(d.url,'https://www.youtube.com/watch?v=yt123');
 });
+
+test('Buffer attend le créneau puis une publication TikTok confirmée, et toutes les autres destinations',async t=>{
+  let now=Date.now();
+  const {store,file}=await fixture(t,{tiktok:{state:'pending',provider:'buffer',channelId:'channel'},facebook:{state:'manual'}},new Date(now+60000).toISOString());
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let creates=0,reads=0;
+  const statuses=['scheduled','sending','sent'];
+  globalThis.fetch=async(url,options)=>{
+    assert.equal(url,'https://api.buffer.com');assert.equal(options.headers.Authorization,'Bearer test-key');
+    const request=JSON.parse(options.body);
+    if(request.query.includes('mutation')) {
+      creates++;assert.equal(store.get('test').destinations.tiktok.state,'publishing');
+      assert.equal(request.variables.input.mode,'shareNow');assert.equal(request.variables.input.schedulingType,'automatic');
+      const media=new URL(request.variables.input.assets[0].video.url);assert.equal(media.pathname,'/media/test.mp4');
+      assert.equal(media.searchParams.get('signature'),mediaSignature('s'.repeat(32),'test',Number(media.searchParams.get('expires'))));
+      return Response.json({data:{createPost:{post:{id:'buffer-post',channelId:'channel'}}}});
+    }
+    reads++;return Response.json({data:{post:{id:'buffer-post',channelId:'channel',channelService:'tiktok',status:statuses.shift(),schedulingType:'automatic',externalLink:'https://www.tiktok.com/@quiz/video/123'}}});
+  };
+  const config={secret:'s'.repeat(32),appUrl:'https://studio.example',bufferKey:'test-key'};
+  const worker=createWorker(store,createProviders(store,config,{now:()=>now}),{now:()=>now});
+  await worker();assert.equal(creates,0);
+  now+=60000;await worker();assert.equal(creates,1);assert.equal(store.get('test').destinations.tiktok.state,'processing');await access(file);
+  await worker();assert.equal(reads,0);
+  for(let i=0;i<3;i++){now=store.get('test').destinations.tiktok.nextPollAt;await worker();await access(file);}
+  assert.equal(creates,1);assert.equal(reads,3);assert.equal(store.get('test').destinations.tiktok.state,'delivered');
+  const p=store.get('test');p.destinations.facebook.state='delivered';store.save(p);await worker();await assert.rejects(access(file));
+});
+
+test('Buffer : mutation ambiguë suspendue sans doublon ni suppression',async t=>{
+  const {store,file}=await fixture(t,{tiktok:{state:'pending',provider:'buffer',channelId:'channel'}});
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let calls=0;
+  globalThis.fetch=async()=>{calls++;throw new Error('timeout après acceptation possible');};
+  const worker=createWorker(store,createProviders(store,{secret:'s'.repeat(32),appUrl:'https://studio.example',bufferKey:'key'}));
+  await worker();await worker();assert.equal(calls,1);assert.equal(store.get('test').destinations.tiktok.state,'attention');await access(file);
+});
+
+test('Buffer : reprise de lecture après erreur temporaire sans recréer le post',async t=>{
+  let now=Date.now();const {store,file}=await fixture(t,{tiktok:{state:'processing',provider:'buffer',channelId:'channel',remoteId:'buffer-post',mediaExpiresAt:now+86400000}});
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let calls=0;
+  globalThis.fetch=async(url,options)=>{calls++;assert.ok(!JSON.parse(options.body).query.includes('mutation'));if(calls===1)throw new Error('network');return Response.json({data:{post:{id:'buffer-post',channelId:'channel',channelService:'tiktok',status:'sent',schedulingType:'automatic',externalLink:'https://www.tiktok.com/@quiz/video/123'}}});};
+  const worker=createWorker(store,createProviders(store,{bufferKey:'key',secret:'s'.repeat(32)},{now:()=>now}));
+  await worker();await access(file);assert.equal(store.get('test').destinations.tiktok.state,'processing');
+  await worker();assert.equal(calls,1);now=store.get('test').destinations.tiktok.nextPollAt;await worker();assert.equal(calls,2);await assert.rejects(access(file));
+});
+
+test('Buffer : notification, mauvais compte, erreur ou expiration ne confirment jamais la réception',async t=>{
+  for(const scenario of ['notification','wrong-channel','error','expired','no-link','graphql']) await t.test(scenario,async t=>{
+    const now=Date.now();const {store,file}=await fixture(t,{tiktok:{state:'processing',provider:'buffer',channelId:'channel',remoteId:'buffer-post',mediaExpiresAt:now+(scenario==='expired'?-1:86400000)}});
+    const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);
+    globalThis.fetch=async()=>Response.json(scenario==='graphql'?{errors:[{message:'private secret'}]}:{data:{post:{id:'buffer-post',channelId:scenario==='wrong-channel'?'other':'channel',channelService:'tiktok',status:scenario==='error'?'error':scenario==='expired'?'scheduled':'sent',schedulingType:scenario==='notification'?'notification':'automatic',externalLink:scenario==='no-link'?null:'https://www.tiktok.com/@quiz/video/123'}}});
+    await createWorker(store,createProviders(store,{bufferKey:'key',secret:'s'.repeat(32)},{now:()=>now}))();
+    await access(file);assert.notEqual(store.get('test').destinations.tiktok.state,'delivered');
+    if(!['no-link','graphql'].includes(scenario))assert.equal(store.get('test').destinations.tiktok.state,'attention');
+  });
+});

@@ -24,7 +24,7 @@ Assistant de configuration : `npm run setup` crée `.env` et te laisse choisir l
 - YouTube : upload anticipé avec `publishAt`, puis vérification du traitement. La politique d'accès et les autorisations du projet Google restent à vérifier sur le compte réel.
 - Facebook : Reels sur une **Page**, pas un profil personnel. Envoi au créneau choisi, publication, puis interrogation du statut.
 - Instagram : Reels sur un **compte professionnel lié à la Page**. Le serveur transmet une URL signée à Meta à l'heure choisie et attend la préparation du conteneur avant publication.
-- TikTok : préparation du texte, téléchargement du fichier et confirmation manuelle avec lien. Aucun faux bouton de connexion ni publication Direct Post privée. Les [règles TikTok](https://developers.tiktok.com/doc/content-sharing-guidelines/) excluent les utilitaires uniquement destinés aux comptes de son propriétaire ou de son équipe. Une éventuelle autre solution devra être évaluée séparément.
+- TikTok : préparation du texte, téléchargement du fichier et confirmation manuelle avec lien. Aucun faux bouton de connexion ni publication Direct Post privée. Les [règles TikTok](https://developers.tiktok.com/doc/content-sharing-guidelines/) excluent les utilitaires uniquement destinés aux comptes de son propriétaire ou de son équipe. Une intégration optionnelle via Buffer est disponible, sans utiliser de client Direct Post privé.
 - Les adaptateurs utilisent les API réelles ; ils ne sont **pas validés sur tes comptes** tant que les identifiants et autorisations ne sont pas fournis. Les tests simulent les réponses réseau et ne publient rien.
 - Première version : un texte commun, un MP4 et une date par publication. Pas encore d'import automatique du dossier CultureQui, de miniatures personnalisées, d'édition par réseau ni de reprise automatique d'upload interrompu.
 
@@ -32,7 +32,7 @@ Assistant de configuration : `npm run setup` crée `.env` et te laisse choisir l
 
 Une date enregistrée dans le studio est une programmation **locale**, pas une confirmation du réseau.
 
-Le MP4 est supprimé uniquement lorsque toutes les destinations sont `delivered`. Pour YouTube, on attend `processingStatus=succeeded`. Pour Instagram, on attend l'ID renvoyé par `media_publish`. Pour Facebook, on attend le statut de publication terminé et la vidéo prête. Pour TikTok, l'utilisateur vérifie la réception puis confirme avec le lien. La suppression concerne uniquement la copie du studio, jamais le fichier d'origine sur l'ordinateur.
+Le MP4 est supprimé uniquement lorsque toutes les destinations sont `delivered`. Pour YouTube, on attend `processingStatus=succeeded`. Pour Instagram, on attend l'ID renvoyé par `media_publish`. Pour Facebook, on attend le statut de publication terminé et la vidéo prête. Pour TikTok manuel, l'utilisateur vérifie la réception puis confirme avec le lien ; via Buffer, le serveur attend la publication confirmée et son lien TikTok. La suppression concerne uniquement la copie du studio, jamais le fichier d'origine sur l'ordinateur.
 
 Si un réseau échoue, le MP4 reste présent. Le studio ne relance pas automatiquement les résultats ambigus, pour ne pas créer de doublons. Un arrêt pendant un upload ou une publication passe la destination en « À vérifier ». Vérifier alors le réseau. Si la vidéo a été reçue, coller son lien pour confirmer. Si elle n'a pas été reçue, conserver le fichier et traiter l'incident ; cette version ne propose pas de relance risquée.
 
@@ -45,6 +45,14 @@ Quotas configurables : `MAX_UPLOAD_MB=1024`, `MAX_STORAGE_MB=5120`. Les brouillo
 ### YouTube
 
 Créer un projet Google Cloud, activer YouTube Data API v3 et configurer l'écran de consentement OAuth ainsi qu'un client Web. Ajouter exactement `APP_URL/auth/youtube/callback` aux URI autorisées. Renseigner GOOGLE_CLIENT_ID et GOOGLE_CLIENT_SECRET dans `.env`, redémarrer, puis « Mes réseaux → Connecter ma chaîne ». Vérifier les exigences Google de consentement, quotas et durée de vie des jetons en mode test. L'option « Conçu pour les enfants » est demandée à chaque publication.
+
+### TikTok via Buffer (optionnel)
+
+Connecter TikTok dans Buffer, puis créer une clé dans Settings → API. Configurer `BUFFER_API_KEY` et `BUFFER_TIKTOK_CHANNEL_ID` sur le serveur. La clé reste privée. Dans chaque nouvelle publication, choisir explicitement le mode manuel ou « Automatique via Buffer » et indiquer si le contenu est généré par IA. Les publications manuelles déjà enregistrées ne changent pas.
+
+Au créneau choisi, Studigo transmet une URL MP4 signée valable 24 heures à Buffer. Une acceptation par Buffer ne confirme pas la réception sur TikTok : le fichier reste présent jusqu'au statut `sent`, au mode `automatic` et à un lien vidéo TikTok confirmé pour le bon compte. Les vérifications sont espacées pour limiter la consommation du quota API. Une erreur, un résultat ambigu ou une attente de plus de 24 heures conserve le fichier et demande une vérification manuelle ; aucune nouvelle création n'est tentée automatiquement. Une lecture de statut temporairement indisponible peut être retentée, sans réenvoyer la vidéo. Après réception par toutes les destinations, seule la copie du studio est supprimée ; Buffer applique sa propre rétention. Les musiques natives TikTok nécessitent le mode manuel.
+
+Références : [API Buffer](https://developers.buffer.com/), [statuts de publication](https://developers.buffer.com/guides/posts-and-scheduling.html).
 
 ### Meta
 

@@ -5,6 +5,7 @@ import { mkdtemp, rm, cp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { mediaSignature } from '../lib/providers.mjs';
 
 test('démarrage direct : charge .env à côté du serveur et conserve les variables du processus',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'studigo-env-'));
@@ -24,8 +25,8 @@ test('démarrage direct : charge .env à côté du serveur et conserve les varia
 
 test('parcours HTTP privé : import, calendrier, confirmation TikTok et suppression effective',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'cq-http-'));
-  const port=45000+Math.floor(Math.random()*10000),origin=`http://127.0.0.1:${port}`,password=randomBytes(24).toString('hex');
-  const proc=spawn(process.execPath,['server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,HOST:'127.0.0.1',PORT:String(port),APP_URL:origin,DATA_DIR:directory,ADMIN_PASSWORD:password,MEDIA_SECRET:randomBytes(32).toString('hex'),MAX_UPLOAD_MB:'1',MAX_STORAGE_MB:'2',GOOGLE_CLIENT_ID:'',GOOGLE_CLIENT_SECRET:'',META_PAGE_ID:'',META_PAGE_TOKEN:'',INSTAGRAM_USER_ID:''},stdio:['ignore','pipe','pipe']});
+  const port=45000+Math.floor(Math.random()*10000),origin=`http://127.0.0.1:${port}`,password=randomBytes(24).toString('hex'),secret=randomBytes(32).toString('hex');
+  const proc=spawn(process.execPath,['server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,HOST:'127.0.0.1',PORT:String(port),APP_URL:origin,DATA_DIR:directory,ADMIN_PASSWORD:password,MEDIA_SECRET:secret,BUFFER_API_KEY:'fake-buffer-key',BUFFER_TIKTOK_CHANNEL_ID:'fake-channel',MAX_UPLOAD_MB:'1',MAX_STORAGE_MB:'2',GOOGLE_CLIENT_ID:'',GOOGLE_CLIENT_SECRET:'',META_PAGE_ID:'',META_PAGE_TOKEN:'',INSTAGRAM_USER_ID:''},stdio:['ignore','pipe','pipe']});
   t.after(async()=>{proc.kill();await new Promise(r=>proc.exitCode!==null?r():proc.once('exit',r));await rm(directory,{recursive:true,force:true});});
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Serveur non démarré')),10000);proc.stdout.once('data',()=>{clearTimeout(timer);resolve();});proc.once('error',reject);proc.once('exit',code=>{clearTimeout(timer);reject(new Error(`Serveur arrêté : ${code}`));});});
   assert.equal((await fetch(`${origin}/api/state`)).status,401);
@@ -36,6 +37,11 @@ test('parcours HTTP privé : import, calendrier, confirmation TikTok et suppress
   const created=await (await request('/api/posts','POST',{})).json();assert.equal(created.status,'draft');
   const content=Buffer.concat([Buffer.from([0,0,0,24]),Buffer.from('ftypisom'),Buffer.alloc(24)]);
   assert.equal((await fetch(`${origin}/api/posts/${created.id}/media`,{method:'PUT',headers:{Cookie:cookie,Origin:origin,'Content-Type':'video/mp4'},body:content})).status,200);
+  const expires=Date.now()+60000,signature=mediaSignature(secret,created.id,expires);
+  const mediaUrl=`${origin}/media/${created.id}.mp4?expires=${expires}&signature=${signature}`;
+  const head=await fetch(mediaUrl,{method:'HEAD'});assert.equal(head.status,200);assert.equal(head.headers.get('content-type'),'video/mp4');assert.equal(head.headers.get('content-length'),String(content.length));assert.equal((await head.arrayBuffer()).byteLength,0);
+  const range=await fetch(mediaUrl,{headers:{Range:'bytes=0-11'}});assert.equal(range.status,206);assert.equal((await range.arrayBuffer()).byteLength,12);
+  assert.equal((await fetch(mediaUrl+'invalid',{method:'HEAD'})).status,403);
   const schedule={title:'Quiz de test',description:'Question vérifiée',scheduledAt:new Date(Date.now()+3600000).toISOString(),madeForKids:false,networks:['youtube']};
   assert.equal((await request(`/api/posts/${created.id}/schedule`,'POST',schedule)).status,409);
   schedule.networks=['tiktok'];assert.equal((await request(`/api/posts/${created.id}/schedule`,'POST',schedule)).status,200);
@@ -45,6 +51,13 @@ test('parcours HTTP privé : import, calendrier, confirmation TikTok et suppress
   assert.equal((await request(`/api/posts/${created.id}/confirm`,'POST',{network:'tiktok',url:'https://www.tiktok.com/@culturequi/video/123',confirmed:true})).status,200);
   const after=await (await request('/api/state')).json();assert.equal(after.storage.used,0);assert.equal(after.posts[0].hasMedia,false);assert.equal(after.posts[0].status,'complete');
   assert.equal((await request(`/api/posts/${created.id}/download`)).status,404);
+  const bufferDraft=await (await request('/api/posts','POST',{})).json();
+  await fetch(`${origin}/api/posts/${bufferDraft.id}/media`,{method:'PUT',headers:{Cookie:cookie,Origin:origin,'Content-Type':'video/mp4'},body:content});
+  const automatic={...schedule,tiktokMode:'buffer'};
+  assert.equal((await request(`/api/posts/${bufferDraft.id}/schedule`,'POST',automatic)).status,409);
+  automatic.tiktokAiGenerated=false;
+  const bufferScheduled=await (await request(`/api/posts/${bufferDraft.id}/schedule`,'POST',automatic)).json();
+  assert.deepEqual(bufferScheduled.destinations.tiktok,{state:'pending',provider:'buffer',channelId:'fake-channel'});
   const draft=await (await request('/api/posts','POST',{})).json();assert.equal((await request(`/api/posts/${draft.id}`,'DELETE')).status,200);
   assert.equal((await request('/api/logout','POST',{})).status,200);assert.equal((await request('/api/state')).status,401);
 });
