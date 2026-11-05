@@ -9,7 +9,7 @@ import { vault, mediaSignature, createProviders, createGoogleClient } from '../l
 
 async function fixture(t,destinations,scheduledAt=new Date(Date.now()-1000).toISOString()) {
   const dir=await mkdtemp(join(tmpdir(),'cq-test-'));const store=createStore(dir);
-  t.after(async()=>{store.close();await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{store.close();await rm(dir,{recursive:true,force:true,maxRetries:3,retryDelay:100});});
   const p={id:'test',createdAt:new Date().toISOString(),status:'scheduled',media:'test.mp4',size:12,title:'Un quiz',description:'Description',madeForKids:false,scheduledAt,destinations};
   await writeFile(join(store.media,p.media),'sample video');store.save(p);return {store,p,file:join(store.media,p.media)};
 }
@@ -210,4 +210,36 @@ test('une destination liée à une autre chaîne YouTube ne peut jamais être en
   const {store,file}=await fixture(t,{youtube:{state:'pending',youtubeChannelId:'UCprevious'}});store.setting('googleChannel',{id:'UCnew'});
   const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);globalThis.fetch=async()=>assert.fail('Aucun appel distant autorisé');
   await createWorker(store,createProviders(store,{secret:'s'.repeat(32)}))();assert.equal(store.get('test').destinations.youtube.state,'attention');await access(file);
+});
+
+test('Buffer : les couvertures Instagram et TikTok utilisent un instant vidéo, jamais une image séparée',async t=>{
+  for(const network of ['instagram','tiktok'])await t.test(network,async t=>{
+    const {store,p}=await fixture(t,{[network]:{state:'pending',provider:'buffer',channelId:'channel',thumbnailOffset:network==='instagram'?1234:0}});
+    const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);
+    globalThis.fetch=async(url,options)=>{const input=JSON.parse(options.body).variables.input;assert.equal(input.assets[0].video.metadata.thumbnailOffset,p.destinations[network].thumbnailOffset);assert.equal(input.assets[0].video.thumbnailUrl,undefined);return Response.json({data:{createPost:{post:{id:'buffer',channelId:'channel'}}}});};
+    await createWorker(store,createProviders(store,{secret:'s'.repeat(32),bufferKey:'key',appUrl:'https://studio.example'}))();assert.equal(store.get('test').destinations[network].state,'processing');
+  });
+});
+
+test('YouTube : couverture envoyée après traitement, fichiers conservés jusqu’à toutes les réceptions',async t=>{
+  const {store,p,file}=await fixture(t,{youtube:{state:'processing',remoteId:'video'},facebook:{state:'manual'}});
+  const cover=join(store.media,'cover.png');await writeFile(cover,Buffer.from('image'));p.cover={file:'cover.png',mime:'image/png',size:5};store.save(p);
+  const secret='s'.repeat(32);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000}));
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let processed=false,uploads=0;
+  globalThis.fetch=async(url,options)=>{
+    if(String(url).includes('videos?'))return Response.json({items:[{processingDetails:{processingStatus:processed?'succeeded':'processing'}}]});
+    uploads++;assert.ok(String(url).includes('/thumbnails/set?videoId=video'));assert.equal(options.headers['Content-Type'],'image/png');assert.equal(store.get('test').destinations.youtube.state,'publishing');for await(const chunk of options.body)assert.ok(chunk.length);return Response.json({items:[{default:{url:'https://i.ytimg.com/thumb.jpg'}}]});
+  };
+  const worker=createWorker(store,createProviders(store,{secret}));await worker();assert.equal(uploads,0);processed=true;await worker();await worker();assert.equal(uploads,1);await access(cover);await access(file);assert.equal(store.get('test').destinations.youtube.thumbnailSet,true);
+  const latest=store.get('test');latest.destinations.facebook.state='delivered';store.save(latest);await worker();await assert.rejects(access(file));await assert.rejects(access(cover));assert.equal(store.get('test').cover,null);
+});
+
+test('YouTube : couverture refusée ou ambiguë garde les fichiers sans réimporter la vidéo',async t=>{
+  for(const scenario of ['refused','ambiguous'])await t.test(scenario,async t=>{
+    const {store,p,file}=await fixture(t,{youtube:{state:'processing',remoteId:'video'}});const cover=join(store.media,'cover.png');await writeFile(cover,'image');p.cover={file:'cover.png',mime:'image/png',size:5};store.save(p);
+    const secret='s'.repeat(32);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000}));
+    const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let uploads=0;
+    globalThis.fetch=async(url,options)=>{if(String(url).includes('videos?'))return Response.json({items:[{processingDetails:{processingStatus:'succeeded'}}]});assert.ok(String(url).includes('/thumbnails/set'));uploads++;for await(const chunk of options.body)assert.ok(chunk.length);if(scenario==='ambiguous')throw new Error('response lost');return new Response('',{status:403});};
+    const worker=createWorker(store,createProviders(store,{secret}));await worker();await worker();assert.equal(uploads,1);assert.equal(store.get('test').destinations.youtube.state,'attention');assert.match(store.get('test').destinations.youtube.error,/couverture/);await access(file);await access(cover);
+  });
 });

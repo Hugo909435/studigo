@@ -41,7 +41,7 @@ const equal=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),creat
 function send(res,status,value) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 async function body(req) { let text=''; for await(const b of req) { text+=b; if(Buffer.byteLength(text)>65536) fail(413,'Requête trop grande'); } try { return JSON.parse(text); } catch { fail(400,'Données invalides'); } }
 function connected() { return { youtube:!!store.setting('google')&&!store.setting('youtubePaused'), facebook:!!(config.bufferKey&&config.bufferFacebook || config.metaToken&&config.pageId), instagram:!!(config.bufferKey&&config.bufferInstagram || config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
-function publicPost(p) { const {media,...rest}=p; return {...rest,hasMedia:!!media}; }
+function publicPost(p) { const {media,cover,...rest}=p; return {...rest,hasMedia:!!media,cover:cover?{mime:cover.mime,size:cover.size}:null}; }
 function owned(id) { const p=store.get(id); if(!p) fail(404,'Publication introuvable'); return p; }
 
 // Les états ambigus après un arrêt ne sont jamais relancés automatiquement.
@@ -158,13 +158,40 @@ const server=createServer(async(req,res)=>{
       if(req.method==='DELETE' && draftDelete) {
         const p=owned(draftDelete[1]);
         if(p.status!=='draft'||locks.has(p.id)||uploading) fail(409,'Seuls les brouillons sans import en cours peuvent être supprimés');
+        if(p.cover) await unlink(join(store.media,p.cover.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});
         if(p.media) await unlink(join(store.media,p.media)).catch(e=>{if(e.code!=='ENOENT')throw e;});
         store.remove(p.id); return send(res,200,{ok:true});
       }
-      const match=path.match(/^\/api\/posts\/([a-f0-9-]+)\/(media|schedule|confirm|download|retry)$/);
+      const match=path.match(/^\/api\/posts\/([a-f0-9-]+)\/(media|cover|preview|schedule|confirm|download|retry)$/);
       if(match) {
         let p=owned(match[1]); const action=match[2];
-        if(req.method==='GET' && action==='download') return await streamMedia(req,res,p,true);
+        if(req.method==='GET' && ['download','preview'].includes(action)) return await streamMedia(req,res,p,action==='download');
+        if(action==='cover') {
+          if(req.method==='GET') {
+            if(!p.cover) fail(404,'Aucune couverture');
+            res.writeHead(200,{'Content-Type':p.cover.mime,'Content-Length':String(p.cover.size)});await pipeline(createReadStream(join(store.media,p.cover.file)),res);return;
+          }
+          if(!['PUT','DELETE'].includes(req.method)) fail(405,'Méthode refusée');
+          if(!['draft','scheduled'].includes(p.status) || uploading || locks.has(p.id) || Object.values(p.destinations).some(d=>!['pending','manual'].includes(d.state))) fail(409,'La couverture ne peut plus être modifiée après le début des envois');
+          locks.add(p.id);
+          let temporary;
+          try {
+            if(req.method==='DELETE') {if(p.cover)await unlink(join(store.media,p.cover.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});p.cover=null;store.save(p);return send(res,200,publicPost(p));}
+            const mime=req.headers['content-type'],size=Number(req.headers['content-length']);
+            if(!['image/jpeg','image/png'].includes(mime) || !Number.isSafeInteger(size) || size<24 || size>50*1024*1024) fail(400,'Importer une image JPEG ou PNG de 50 Mo maximum');
+            if(store.bytes()+size>maxStorage) fail(413,'Quota de stockage atteint');
+            temporary=join(store.media,`${randomUUID()}.part`);let count=0;
+            await pipeline(req,new Transform({transform(chunk,encoding,callback){count+=chunk.length;callback(count>size?new Error('Taille incorrecte'):null,chunk);}}),createWriteStream(temporary,{flags:'wx',mode:0o600}));
+            if(count!==size) fail(400,'Image incomplète');
+            const f=await open(temporary);const header=Buffer.alloc(24);try{await f.read(header,0,24,0);}finally{await f.close();}
+            const valid=mime==='image/png'?header.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))&&header.toString('ascii',12,16)==='IHDR'&&header.readUInt32BE(16)>0&&header.readUInt32BE(20)>0:header[0]===255&&header[1]===216&&header[2]===255;
+            if(!valid) fail(400,'Le fichier ne correspond pas à une image JPEG ou PNG');
+            const filename=`${p.id}-cover.${mime==='image/png'?'png':'jpg'}`,previous=p.cover;
+            await rename(temporary,join(store.media,filename));p.cover={file:filename,mime,size};store.save(p);
+            if(previous&&previous.file!==filename)await unlink(join(store.media,previous.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});
+            return send(res,200,publicPost(p));
+          } finally {locks.delete(p.id);if(temporary)await unlink(temporary).catch(()=>{});}
+        }
         if(req.method==='PUT' && action==='media') {
           if(p.status!=='draft'||p.media) fail(409,'Cette publication contient déjà un fichier');
           if(uploading) fail(409,'Un import est déjà en cours');
@@ -196,6 +223,7 @@ const server=createServer(async(req,res)=>{
             if(network==='youtube' && plan.playlistIds.length && !google.canManagePlaylists()) fail(409,'Reconnecter YouTube dans Mes réseaux pour autoriser les playlists');
             if(network==='tiktok' && tiktokMode==='buffer' && (!ready.tiktok || typeof (input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
             const bufferTarget=network==='facebook'?config.bufferFacebook:network==='instagram'?config.bufferInstagram:null;
+            if(network==='instagram' && plan.thumbnailOffset!==undefined && !(bufferTarget&&config.bufferKey)) fail(409,'Le choix de couverture Instagram nécessite la connexion Buffer');
             plans[network]={...plan,...(network==='youtube'&&store.setting('googleChannel')?{youtubeChannelId:store.setting('googleChannel').id}:{}),...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):bufferTarget&&config.bufferKey?{state:'pending',provider:'buffer',channelId:bufferTarget}:{state:'pending'})};
           }
           const earliest=Object.values(plans).map(d=>d.scheduledAt).sort()[0];

@@ -26,7 +26,7 @@ Assistant de configuration : `npm run setup` crée `.env` et te laisse choisir l
 - Instagram : Reels sur un **compte professionnel lié à la Page**. Le serveur transmet une URL signée à Meta à l'heure choisie et attend la préparation du conteneur avant publication.
 - TikTok : préparation du texte, téléchargement du fichier et confirmation manuelle avec lien. Aucun faux bouton de connexion ni publication Direct Post privée. Les [règles TikTok](https://developers.tiktok.com/doc/content-sharing-guidelines/) excluent les utilitaires uniquement destinés aux comptes de son propriétaire ou de son équipe. Une intégration optionnelle via Buffer est disponible, sans utiliser de client Direct Post privé.
 - Les adaptateurs utilisent les API réelles ; ils ne sont **pas validés sur tes comptes** tant que les identifiants et autorisations ne sont pas fournis. Les tests simulent les réponses réseau et ne publient rien.
-- Un MP4 commun, des titres, descriptions et horaires propres à chaque réseau. Réglages réutilisables, visibilité, audience, tags et playlists YouTube. Pas encore d'import automatique du dossier CultureQui, de miniatures personnalisées ni de reprise automatique d'upload interrompu.
+- Un MP4 commun, des titres, descriptions et horaires propres à chaque réseau. Réglages réutilisables, visibilité, audience, tags et playlists YouTube. Pas encore d'import automatique du dossier CultureQui, de reprise automatique d'upload interrompu.
 
 ## Stockage : réception avant suppression
 
@@ -39,6 +39,17 @@ Si un réseau échoue, le MP4 reste présent. Le studio ne relance pas automatiq
 Instagram ne constitue pas un stockage durable pour une vidéo programmée plusieurs semaines à l'avance. Le serveur garde donc la copie temporaire jusqu'au créneau et à la confirmation. Il faut dimensionner le stockage pour les vidéos en attente ; zéro stockage dès le clic « Programmer » n'est pas possible pour tous les réseaux.
 
 Quotas configurables : `MAX_UPLOAD_MB=1024`, `MAX_STORAGE_MB=5120`. Les brouillons sont supprimables depuis l'interface ; supprimer un brouillon enlève aussi son MP4. Aucune génération de miniature ni copie d'archive. Les textes et liens occupent peu de place mais restent en base. Les journaux Docker sont limités. Les médias temporaires `data/media/` ne doivent pas être inclus dans les sauvegardes de l'hébergeur : sa rétention et ses snapshots sont indépendants de l'application.
+
+## Couvertures de vidéo
+
+Dans chaque destination du formulaire :
+- YouTube : importer une image JPEG/PNG (limite Studigo : 50 Mo). L’image est privée dans DATA_DIR, comptée dans le quota et envoyée par `thumbnails.set` seulement après `processingStatus=succeeded`, y compris pour les Shorts. La chaîne doit avoir le droit d’utiliser des miniatures personnalisées. Un refus ou une réponse ambiguë conserve les fichiers et demande une vérification dans YouTube Studio, sans réimporter la vidéo.
+- Instagram et TikTok via Buffer : choisir un instant dans le MP4, en secondes avec aperçu, ou reprendre l’image affichée dans le lecteur. L’instant est transmis en millisecondes (`assets.video.metadata.thumbnailOffset`), y compris zéro. Pas d’import d’image séparée pour ces destinations. En mode TikTok manuel, le choix doit être reproduit dans TikTok.
+- Facebook via Buffer : pas de choix de couverture dans cette intégration. Le formulaire indique cette limite et ne propose pas de réglage fictif.
+
+L’image YouTube est supprimée avec le MP4 uniquement après réception par toutes les destinations, ou à la suppression explicite d’un brouillon. Modifier la couverture n’est permis qu’avant le début des envois. Les aperçus d’images extraites sont créés dans le navigateur, sans copie permanente du MP4 et sans dépendance de production supplémentaire.
+
+Références : [miniatures YouTube](https://developers.google.com/youtube/data/reference/rest/v3/thumbnails/set), [couvertures Buffer](https://developers.buffer.com/types/VideoAssetInput.html).
 
 ## Réglages par destination et playlists
 

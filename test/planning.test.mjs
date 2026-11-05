@@ -19,3 +19,11 @@ test('validation des limites par réseau, dates, audience et listes de playlists
   assert.throws(()=>destinationPlan('tiktok',{scheduledAt:'not-a-date'},common),/date/);
   assert.equal(destinationPlan('youtube',{description:'x'.repeat(5000)},common).description.length,5000);
 });
+
+test('couvertures : instants en millisecondes uniquement pour Instagram et TikTok',()=>{
+  assert.equal(destinationPlan('instagram',{thumbnailOffset:0},common).thumbnailOffset,0);
+  assert.equal(destinationPlan('tiktok',{thumbnailOffset:1250},common).thumbnailOffset,1250);
+  for(const value of [-1,1.5,'1000',2147483648])assert.throws(()=>destinationPlan('instagram',{thumbnailOffset:value},common),/Couverture/);
+  assert.throws(()=>destinationPlan('facebook',{thumbnailOffset:0},common),/Couverture/);
+  assert.equal(planFor(common,{thumbnailOffset:2400}).thumbnailOffset,2400);
+});
