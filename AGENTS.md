@@ -1,4 +1,4 @@
-# CultureQui Studio
+# Studigo
 
 Projet indépendant de cultureQui. Node 24, aucune dépendance npm de production.
 Ne jamais ajouter des médias ou des secrets au Git. Données dans DATA_DIR uniquement.

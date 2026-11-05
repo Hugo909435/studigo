@@ -1,4 +1,4 @@
-# CultureQui Studio
+# Studigo
 
 Application privée de préparation et de programmation des vidéos. Projet et dépôt Git indépendants du site public `cultureQui`. Aucun média du projet existant n'a été copié.
 

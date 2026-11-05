@@ -155,11 +155,11 @@ async function streamMedia(req,res,p,download=false) {
   const file=join(store.media,p.media), size=(await stat(file)).size;
   let start=0,end=size-1,status=200;
   if(req.headers.range) { const m=/^bytes=(\d+)-(\d*)$/.exec(req.headers.range); if(!m) fail(416,'Plage invalide'); start=Number(m[1]); end=m[2]?Number(m[2]):end; if(start>end||end>=size) fail(416,'Plage invalide'); status=206; }
-  res.writeHead(status,{'Content-Type':'video/mp4','Accept-Ranges':'bytes','Content-Length':end-start+1,...(status===206?{'Content-Range':`bytes ${start}-${end}/${size}`} : {}),...(download?{'Content-Disposition':`attachment; filename="culturequi-${p.id}.mp4"`}:{})});
+  res.writeHead(status,{'Content-Type':'video/mp4','Accept-Ranges':'bytes','Content-Length':end-start+1,...(status===206?{'Content-Range':`bytes ${start}-${end}/${size}`} : {}),...(download?{'Content-Disposition':`attachment; filename="studigo-${p.id}.mp4"`}:{})});
   await pipeline(createReadStream(file,{start,end}),res);
 }
 server.requestTimeout=30*60*1000;
-server.listen(Number(env.PORT || 4310),env.HOST || '127.0.0.1',()=>console.log(`CultureQui Studio : ${config.appUrl}`));
+server.listen(Number(env.PORT || 4310),env.HOST || '127.0.0.1',()=>console.log(`Studigo : ${config.appUrl}`));
 const timer=setInterval(()=>worker().catch(()=>console.error('File suspendue : vérifier les données et le stockage.')),20000);
 timer.unref();
 const cleanup=setInterval(()=>{const now=Date.now(); for(const [key,v] of sessions)if(v.expires<now)sessions.delete(key); for(const [key,v]of oauthStates)if(v.expires<now)oauthStates.delete(key);for(const[key,v]of loginAttempts)if(v.until<now)loginAttempts.delete(key);},60000); cleanup.unref();
