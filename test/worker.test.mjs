@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createStore } from '../lib/store.mjs';
 import { createWorker, purgeDelivered } from '../lib/worker.mjs';
-import { vault, mediaSignature, createProviders } from '../lib/providers.mjs';
+import { vault, mediaSignature, createProviders, createGoogleClient } from '../lib/providers.mjs';
 
 async function fixture(t,destinations,scheduledAt=new Date(Date.now()-1000).toISOString()) {
   const dir=await mkdtemp(join(tmpdir(),'cq-test-'));const store=createStore(dir);
@@ -114,4 +114,50 @@ test('Buffer : notification, mauvais compte, erreur ou expiration ne confirment 
     await access(file);assert.notEqual(store.get('test').destinations.tiktok.state,'delivered');
     if(!['no-link','graphql'].includes(scenario))assert.equal(store.get('test').destinations.tiktok.state,'attention');
   });
+});
+
+test('horaires et textes propres à chaque réseau, conservation du MP4 jusqu’au dernier créneau',async t=>{
+  let now=Date.now();const {store,file}=await fixture(t,{facebook:{state:'pending',title:'Facebook à midi',description:'Texte Facebook',scheduledAt:new Date(now+60000).toISOString()},tiktok:{state:'pending',title:'TikTok le soir',description:'Texte TikTok',scheduledAt:new Date(now+120000).toISOString()}});
+  const calls=[];const record=async(p,d,save)=>{calls.push({title:p.title,description:p.description});d.state='delivered';save();};
+  const worker=createWorker(store,{facebook:record,tiktok:record},{now:()=>now});
+  await worker();assert.equal(calls.length,0);now+=60000;await worker();await access(file);assert.deepEqual(calls,[{title:'Facebook à midi',description:'Texte Facebook'}]);
+  now+=60000;await worker();assert.equal(calls[1].title,'TikTok le soir');assert.equal(calls[1].description,'Texte TikTok');await assert.rejects(access(file));
+});
+
+test('YouTube : une vidéo traitée est classée dans les playlists choisies avant confirmation',async t=>{
+  const {store,p,file}=await fixture(t,{youtube:{state:'processing',remoteId:'video',playlistIds:['PLfirst','PLsecond'],title:'YouTube uniquement'}});
+  const secret='s'.repeat(32);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000}));
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);const additions=[];
+  globalThis.fetch=async(url,options)=>{
+    if(String(url).includes('videos?'))return Response.json({items:[{processingDetails:{processingStatus:'succeeded'}}]});
+    assert.ok(String(url).endsWith('playlistItems?part=snippet'));const body=JSON.parse(options.body);assert.equal(body.snippet.resourceId.videoId,'video');
+    assert.equal(store.get(p.id).destinations.youtube.state,'publishing');additions.push(body.snippet.playlistId);return Response.json({id:'playlist-item-'+additions.length});
+  };
+  await createWorker(store,createProviders(store,{secret}))();assert.deepEqual(additions,['PLfirst','PLsecond']);assert.deepEqual(store.get(p.id).destinations.youtube.addedPlaylistIds,additions);await assert.rejects(access(file));
+});
+
+test('YouTube : résultat ambigu de classement ne réimporte ni vidéo ni playlist',async t=>{
+  const {store,file}=await fixture(t,{youtube:{state:'processing',remoteId:'video',playlistIds:['PLfirst']}});
+  const secret='s'.repeat(32);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000}));
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let additions=0;
+  globalThis.fetch=async url=>{if(String(url).includes('videos?'))return Response.json({items:[{processingDetails:{processingStatus:'succeeded'}}]});additions++;throw new Error('réponse perdue');};
+  const worker=createWorker(store,createProviders(store,{secret}));await worker();await worker();assert.equal(additions,1);assert.equal(store.get('test').destinations.youtube.state,'attention');assert.match(store.get('test').destinations.youtube.error,/classement/);await access(file);
+});
+
+test('YouTube : visibilité non répertoriée attend son créneau et ne programme pas de publication publique',async t=>{
+  let now=Date.now();const {store,p}=await fixture(t,{youtube:{state:'pending',privacy:'unlisted',scheduledAt:new Date(now+60000).toISOString()}});
+  const secret='s'.repeat(32);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000}));
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let calls=0;
+  globalThis.fetch=async(url,options)=>{calls++;if(calls===1){const body=JSON.parse(options.body);assert.equal(body.status.privacyStatus,'unlisted');assert.equal(body.status.publishAt,undefined);return new Response('',{headers:{location:'https://www.googleapis.com/upload/session'}});}for await(const chunk of options.body)assert.ok(chunk.length);return Response.json({id:'video'});};
+  const worker=createWorker(store,createProviders(store,{secret}),{now:()=>now});await worker();assert.equal(calls,0);now+=60000;await worker();assert.equal(calls,2);assert.equal(store.get(p.id).destinations.youtube.state,'processing');
+});
+
+test('YouTube : playlists paginées et autorisation supplémentaire détectée sans invalider la connexion existante',async t=>{
+  const {store}=await fixture(t,{});const secret='s'.repeat(32),box=vault(secret);
+  const tokens={access_token:'test',expiresAt:Date.now()+3600000,scope:'https://www.googleapis.com/auth/youtube.readonly'};
+  store.setting('google',box.encrypt(tokens));const google=createGoogleClient(store,{secret});assert.equal(google.canManagePlaylists(),false);
+  const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);let calls=0;
+  globalThis.fetch=async url=>{calls++;if(calls===2)assert.match(String(url),/pageToken=next/);return Response.json({items:[{id:'PL'+calls,snippet:{title:'Quiz '+calls},status:{privacyStatus:'private'}}],...(calls===1?{nextPageToken:'next'}:{})});};
+  const playlists=await google.playlists();assert.equal(playlists.length,2);assert.equal(calls,2);
+  store.setting('google',box.encrypt({...tokens,scope:tokens.scope+' https://www.googleapis.com/auth/youtube.force-ssl'}));assert.equal(google.canManagePlaylists(),true);
 });

@@ -5,7 +5,8 @@ import { mkdtemp, rm, cp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { mediaSignature } from '../lib/providers.mjs';
+import { mediaSignature, vault } from '../lib/providers.mjs';
+import { createStore } from '../lib/store.mjs';
 
 test('démarrage direct : charge .env à côté du serveur et conserve les variables du processus',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'studigo-env-'));
@@ -57,7 +58,34 @@ test('parcours HTTP privé : import, calendrier, confirmation TikTok et suppress
   assert.equal((await request(`/api/posts/${bufferDraft.id}/schedule`,'POST',automatic)).status,409);
   automatic.tiktokAiGenerated=false;
   const bufferScheduled=await (await request(`/api/posts/${bufferDraft.id}/schedule`,'POST',automatic)).json();
-  assert.deepEqual(bufferScheduled.destinations.tiktok,{state:'pending',provider:'buffer',channelId:'fake-channel'});
+  assert.deepEqual(bufferScheduled.destinations.tiktok,{title:schedule.title,description:schedule.description,scheduledAt:schedule.scheduledAt,tiktokAiGenerated:false,state:'pending',provider:'buffer',channelId:'fake-channel'});
+  const customized={...automatic,destinationSettings:{tiktok:{title:'TikTok indépendant',description:'Autre description',scheduledAt:new Date(Date.now()+7200000).toISOString()}}};
+  const edited=await (await request(`/api/posts/${bufferDraft.id}/schedule`,'POST',customized)).json();
+  assert.equal(edited.destinations.tiktok.title,'TikTok indépendant');assert.equal(edited.destinations.tiktok.description,'Autre description');assert.equal(edited.destinations.tiktok.scheduledAt,customized.destinationSettings.tiktok.scheduledAt);
+  const prefs=await request('/api/preferences','PUT',{tiktok:{title:'Un quiz',description:'Description habituelle',time:'20:30'},youtube:{tags:['quiz'],privacy:'private'}});assert.equal(prefs.status,200);
+  const preferences=await (await request('/api/state')).json();assert.equal(preferences.defaults.tiktok.time,'20:30');assert.equal(preferences.defaults.youtube.privacy,'private');assert.equal(preferences.youtubePlaylistsEnabled,false);
+  assert.equal((await request('/api/preferences','PUT',{tiktok:{time:'25:00'}})).status,400);
+  assert.equal((await request('/api/youtube/playlists','POST',{title:'Quiz',description:'',privacy:'private',requestId:created.id})).status,409);
+  assert.equal((await request(`/api/posts/${created.id}/schedule`,'POST',schedule)).status,409);
   const draft=await (await request('/api/posts','POST',{})).json();assert.equal((await request(`/api/posts/${draft.id}`,'DELETE')).status,200);
   assert.equal((await request('/api/logout','POST',{})).status,200);assert.equal((await request('/api/state')).status,401);
+});
+
+test('création de playlist : une requête répétée ou ambiguë ne crée jamais de doublon',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'studigo-playlists-'));const secret=randomBytes(32).toString('hex');
+  const store=createStore(directory);store.setting('google',vault(secret).encrypt({access_token:'test',expiresAt:Date.now()+3600000,scope:'https://www.googleapis.com/auth/youtube.force-ssl'}));store.close();
+  const preload=join(directory,'mock-google.mjs');
+  await writeFile(preload,`let calls=0;globalThis.fetch=async(url,options)=>{if(!String(url).endsWith('playlists?part=snippet,status')||options.method!=='POST')throw new Error('Unexpected request');calls++;const data=JSON.parse(options.body);if(data.snippet.title==='Ambigu')throw new Error('Lost response');return Response.json({id:'playlist-'+calls});};`);
+  const port=45000+Math.floor(Math.random()*10000),origin=`http://127.0.0.1:${port}`,password=randomBytes(24).toString('hex');
+  const proc=spawn(process.execPath,['--import',new URL(`file:///${preload.replaceAll('\\','/')}`).href,'server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,HOST:'127.0.0.1',PORT:String(port),APP_URL:origin,DATA_DIR:directory,ADMIN_PASSWORD:password,MEDIA_SECRET:secret,GOOGLE_CLIENT_ID:'test',GOOGLE_CLIENT_SECRET:'test',BUFFER_API_KEY:'',BUFFER_TIKTOK_CHANNEL_ID:'',META_PAGE_ID:'',META_PAGE_TOKEN:'',INSTAGRAM_USER_ID:''},stdio:['ignore','pipe','pipe']});
+  t.after(async()=>{proc.kill();await new Promise(r=>proc.exitCode!==null?r():proc.once('exit',r));await rm(directory,{recursive:true,force:true});});
+  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Serveur non démarré')),10000);proc.stdout.once('data',()=>{clearTimeout(timer);resolve();});proc.once('error',reject);proc.once('exit',code=>{clearTimeout(timer);reject(new Error(`Serveur arrêté : ${code}`));});});
+  const login=await fetch(origin+'/api/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({password})});const cookie=login.headers.get('set-cookie').split(';')[0];
+  const create=data=>fetch(origin+'/api/youtube/playlists',{method:'POST',headers:{Origin:origin,Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const data={requestId:'11111111-1111-4111-8111-111111111111',title:'Quiz',description:'La série',privacy:'private'};
+  const first=await create(data);assert.equal(first.status,201);assert.equal((await first.json()).id,'playlist-1');
+  const repeated=await create(data);assert.equal(repeated.status,200);assert.equal((await repeated.json()).id,'playlist-1');
+  const ambiguous={...data,requestId:'22222222-2222-4222-8222-222222222222',title:'Ambigu'};
+  assert.equal((await create(ambiguous)).status,502);assert.equal((await create(ambiguous)).status,409);
+  const third=await create({...data,requestId:'33333333-3333-4333-8333-333333333333'});assert.equal((await third.json()).id,'playlist-3');
 });

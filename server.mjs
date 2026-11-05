@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from 'node:process';
 import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { createStore } from './lib/store.mjs';
+import { destinationPlan } from './lib/planning.mjs';
 import { createWorker, purgeDelivered } from './lib/worker.mjs';
-import { createProviders, vault, jsonFetch, mediaSignature } from './lib/providers.mjs';
+import { createProviders, createGoogleClient, vault, jsonFetch, mediaSignature } from './lib/providers.mjs';
 
 const base=dirname(fileURLToPath(import.meta.url));
 // Les hébergeurs peuvent lancer le fichier directement, sans passer par npm start.
@@ -30,7 +31,7 @@ const store=createStore(resolve(base,env.DATA_DIR || 'data'));
 for(const name of readdirSync(store.media)) if(/^[a-f0-9-]{36}\.part$/.test(name)) unlinkSync(join(store.media,name));
 const sessions=new Map(); const loginAttempts=new Map(); const oauthStates=new Map();
 const locks=new Set();
-const box=vault(config.secret); const worker=createWorker(store,createProviders(store,config),{locks});
+const box=vault(config.secret); const google=createGoogleClient(store,config); const worker=createWorker(store,createProviders(store,config),{locks});
 const maxUpload=Number(env.MAX_UPLOAD_MB || 1024)*1024*1024;
 const maxStorage=Number(env.MAX_STORAGE_MB || 5120)*1024*1024;
 if (![maxUpload,maxStorage].every(n=>Number.isFinite(n)&&n>0)) throw new Error('Quotas invalides');
@@ -77,11 +78,11 @@ const server=createServer(async(req,res)=>{
     if(path.startsWith('/api/') || path.startsWith('/auth/')) {
       if(!authenticated) fail(401,'Connexion requise');
       if(req.method==='POST' && path==='/api/logout') { sessions.delete(sid); res.setHeader('Set-Cookie','studio=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); return send(res,200,{ok:true}); }
-      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),googleConfigured:!!(config.googleId&&config.googleSecret),storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
+      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),googleConfigured:!!(config.googleId&&config.googleSecret),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
       if(req.method==='GET' && path==='/auth/youtube') {
         if(!config.googleId||!config.googleSecret) fail(409,'Configurer les identifiants Google sur le serveur');
         const state=randomBytes(24).toString('hex'); oauthStates.set(state,{sid,expires:Date.now()+600000});
-        const params=new URLSearchParams({client_id:config.googleId,redirect_uri:`${config.appUrl}/auth/youtube/callback`,response_type:'code',scope:'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly',access_type:'offline',prompt:'consent',state});
+        const params=new URLSearchParams({client_id:config.googleId,redirect_uri:`${config.appUrl}/auth/youtube/callback`,response_type:'code',scope:'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl',access_type:'offline',prompt:'consent',state});
         res.writeHead(302,{Location:`https://accounts.google.com/o/oauth2/v2/auth?${params}`}); return res.end();
       }
       if(req.method==='GET' && path==='/auth/youtube/callback') {
@@ -90,6 +91,40 @@ const server=createServer(async(req,res)=>{
         const tokens=await jsonFetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({client_id:config.googleId,client_secret:config.googleSecret,code:url.searchParams.get('code'),grant_type:'authorization_code',redirect_uri:`${config.appUrl}/auth/youtube/callback`})});
         if(!tokens.refresh_token) fail(400,'Autorisation hors ligne absente');
         store.setting('google',box.encrypt({...tokens,expiresAt:Date.now()+tokens.expires_in*1000})); res.writeHead(302,{Location:'/'}); return res.end();
+      }
+      if(req.method==='PUT' && path==='/api/preferences') {
+        const data=await body(req);const defaults={};
+        for(const network of ['youtube','facebook','instagram','tiktok']) {
+          const input=data[network] || {};
+          if(input.time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(input.time)) fail(400,'Heure par défaut invalide');
+          const validated=destinationPlan(network,{...input,title:input.title || 'Titre',scheduledAt:new Date(Date.now()+3600000).toISOString(),madeForKids:input.madeForKids ?? false});
+          delete validated.scheduledAt;
+          if(network==='youtube' && input.madeForKids===undefined) delete validated.madeForKids;
+          defaults[network]={...validated,title:input.title || '',time:input.time || ''};
+        }
+        store.setting('defaults',defaults);return send(res,200,{ok:true,defaults});
+      }
+      if(req.method==='GET' && path==='/api/youtube/playlists') {
+        try { const playlists=await google.playlists();store.setting('youtubePlaylists',playlists);return send(res,200,{playlists,canManage:google.canManagePlaylists()}); }
+        catch(e) { fail(e.status || 502,'Lecture YouTube impossible. Vérifie la connexion et les autorisations dans Mes réseaux.'); }
+      }
+      if(req.method==='POST' && path==='/api/youtube/playlists') {
+        if(!google.canManagePlaylists()) fail(409,'Reconnecter YouTube dans Mes réseaux pour autoriser les playlists');
+        const data=await body(req);
+        if(typeof data.requestId!=='string'||!/^[a-f0-9-]{36}$/.test(data.requestId)) fail(400,'Identifiant de création requis');
+        if(typeof data.title!=='string'||!data.title.trim()||data.title.length>150||/[<>]/.test(data.title)) fail(400,'Titre de playlist requis, 150 caractères maximum');
+        if(typeof data.description!=='string'||data.description.length>5000||!['private','unlisted','public'].includes(data.privacy)) fail(400,'Description ou visibilité de playlist invalide');
+        const key=`playlist-create:${data.requestId}`,previous=store.setting(key);
+        if(previous?.result) return send(res,200,previous.result);
+        if(previous) fail(409,'Création précédente à vérifier dans YouTube Studio. Ne relance pas sans vérifier si la playlist existe.');
+        store.setting(key,{state:'creating',title:data.title.trim(),createdAt:new Date().toISOString()});
+        try {
+          const result=await google.request('playlists?part=snippet,status',{snippet:{title:data.title.trim(),description:data.description},status:{privacyStatus:data.privacy}});
+          if(!result.id) throw new Error('Playlist non confirmée');
+          const playlist={id:result.id,title:data.title.trim(),description:data.description,privacy:data.privacy};
+          store.setting(key,{state:'created',result:playlist});store.setting('youtubePlaylists',[...(store.setting('youtubePlaylists') || []),playlist]);
+          return send(res,201,playlist);
+        } catch { fail(502,'Résultat de création à vérifier dans YouTube Studio avant toute nouvelle tentative.'); }
       }
       if(req.method==='POST' && path==='/api/posts') {
         const p={id:randomUUID(),createdAt:new Date().toISOString(),status:'draft',title:'',description:'',media:null,size:0,destinations:{}};
@@ -104,7 +139,7 @@ const server=createServer(async(req,res)=>{
       }
       const match=path.match(/^\/api\/posts\/([a-f0-9-]+)\/(media|schedule|confirm|download|retry)$/);
       if(match) {
-        const p=owned(match[1]), action=match[2];
+        let p=owned(match[1]); const action=match[2];
         if(req.method==='GET' && action==='download') return await streamMedia(req,res,p,true);
         if(req.method==='PUT' && action==='media') {
           if(p.status!=='draft'||p.media) fail(409,'Cette publication contient déjà un fichier');
@@ -124,18 +159,22 @@ const server=createServer(async(req,res)=>{
           return send(res,200,publicPost(p));
         }
         if(req.method==='POST' && action==='schedule') {
-          if(p.status!=='draft'||!p.media) fail(409,'Importer une vidéo avant de programmer');
-          const data=await body(req); const date=new Date(data.scheduledAt);
-          if(typeof data.title!=='string'||!data.title.trim()||data.title.length>100||/[<>]/.test(data.title)) fail(400,'Titre requis, 100 caractères maximum, sans chevrons');
-          if(typeof data.description!=='string'||data.description.length>2000) fail(400,'Description : 2 000 caractères maximum');
-          if(!Number.isFinite(date.getTime())||date.getTime()<Date.now()-60000) fail(400,'Choisir une date à venir');
-          if(typeof data.madeForKids!=='boolean') fail(400,'Indiquer si la vidéo est conçue pour les enfants');
+          const data=await body(req);p=owned(match[1]);
+          if(!p.media || !['draft','scheduled'].includes(p.status) || locks.has(p.id) || Object.values(p.destinations).some(d=>!['pending','manual'].includes(d.state))) fail(409,'Seules les publications dont aucun envoi n’a commencé peuvent être modifiées');
           if(!Array.isArray(data.networks)||!data.networks.length||data.networks.some(n=>!['youtube','facebook','instagram','tiktok'].includes(n))) fail(400,'Choisir au moins un réseau');
-          const ready=connected(); if(data.networks.some(n=>n!=='tiktok'&&!ready[n])) fail(409,'Configurer les comptes sélectionnés avant la programmation');
+          const ready=connected();if(data.networks.some(n=>n!=='tiktok'&&!ready[n])) fail(409,'Configurer les comptes sélectionnés avant la programmation');
           const tiktokMode=data.tiktokMode || 'manual';
           if(!['manual','buffer'].includes(tiktokMode)) fail(400,'Mode TikTok invalide');
-          if(data.networks.includes('tiktok') && tiktokMode==='buffer' && (!ready.tiktok || typeof data.tiktokAiGenerated!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
-          p.title=data.title.trim(); p.description=data.description; p.scheduledAt=date.toISOString(); p.madeForKids=data.madeForKids; p.tiktokAiGenerated=data.tiktokAiGenerated===true; p.status='scheduled'; p.destinations=Object.fromEntries([...new Set(data.networks)].map(n=>[n,n==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):{state:'pending'}])); store.save(p);
+          const plans={};
+          for(const network of [...new Set(data.networks)]) {
+            const input=data.destinationSettings?.[network] ?? {};
+            const plan=destinationPlan(network,input,data);
+            if(network==='youtube' && plan.playlistIds.length && !google.canManagePlaylists()) fail(409,'Reconnecter YouTube dans Mes réseaux pour autoriser les playlists');
+            if(network==='tiktok' && tiktokMode==='buffer' && (!ready.tiktok || typeof (input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
+            plans[network]={...plan,...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):{state:'pending'})};
+          }
+          const earliest=Object.values(plans).map(d=>d.scheduledAt).sort()[0];
+          p.title=typeof data.title==='string'&&data.title.trim()?data.title.trim().slice(0,100):Object.values(plans)[0].title;p.description=typeof data.description==='string'?data.description:'';p.scheduledAt=earliest;p.madeForKids=plans.youtube?.madeForKids ?? data.madeForKids ?? false;p.tiktokAiGenerated=plans.tiktok?.tiktokAiGenerated ?? false;p.status='scheduled';p.destinations=plans;store.save(p);
           return send(res,200,publicPost(p));
         }
         if(req.method==='POST' && action==='confirm') {

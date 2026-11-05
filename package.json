@@ -9,6 +9,6 @@
     "start": "node --env-file-if-exists=.env server.mjs",
     "dev": "node --env-file-if-exists=.env --watch server.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check server.mjs && node --check lib/store.mjs && node --check lib/worker.mjs && node --check lib/providers.mjs && node --check public/app.js && node --check scripts/setup.mjs"
+    "check": "node --check server.mjs && node --check lib/store.mjs && node --check lib/worker.mjs && node --check lib/planning.mjs && node --check lib/providers.mjs && node --check public/app.js && node --check scripts/setup.mjs"
   }
 }

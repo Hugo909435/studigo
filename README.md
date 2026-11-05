@@ -26,7 +26,7 @@ Assistant de configuration : `npm run setup` crée `.env` et te laisse choisir l
 - Instagram : Reels sur un **compte professionnel lié à la Page**. Le serveur transmet une URL signée à Meta à l'heure choisie et attend la préparation du conteneur avant publication.
 - TikTok : préparation du texte, téléchargement du fichier et confirmation manuelle avec lien. Aucun faux bouton de connexion ni publication Direct Post privée. Les [règles TikTok](https://developers.tiktok.com/doc/content-sharing-guidelines/) excluent les utilitaires uniquement destinés aux comptes de son propriétaire ou de son équipe. Une intégration optionnelle via Buffer est disponible, sans utiliser de client Direct Post privé.
 - Les adaptateurs utilisent les API réelles ; ils ne sont **pas validés sur tes comptes** tant que les identifiants et autorisations ne sont pas fournis. Les tests simulent les réponses réseau et ne publient rien.
-- Première version : un texte commun, un MP4 et une date par publication. Pas encore d'import automatique du dossier CultureQui, de miniatures personnalisées, d'édition par réseau ni de reprise automatique d'upload interrompu.
+- Un MP4 commun, des titres, descriptions et horaires propres à chaque réseau. Réglages réutilisables, visibilité, audience, tags et playlists YouTube. Pas encore d'import automatique du dossier CultureQui, de miniatures personnalisées ni de reprise automatique d'upload interrompu.
 
 ## Stockage : réception avant suppression
 
@@ -39,6 +39,16 @@ Si un réseau échoue, le MP4 reste présent. Le studio ne relance pas automatiq
 Instagram ne constitue pas un stockage durable pour une vidéo programmée plusieurs semaines à l'avance. Le serveur garde donc la copie temporaire jusqu'au créneau et à la confirmation. Il faut dimensionner le stockage pour les vidéos en attente ; zéro stockage dès le clic « Programmer » n'est pas possible pour tous les réseaux.
 
 Quotas configurables : `MAX_UPLOAD_MB=1024`, `MAX_STORAGE_MB=5120`. Les brouillons sont supprimables depuis l'interface ; supprimer un brouillon enlève aussi son MP4. Aucune génération de miniature ni copie d'archive. Les textes et liens occupent peu de place mais restent en base. Les journaux Docker sont limités. Les médias temporaires `data/media/` ne doivent pas être inclus dans les sauvegardes de l'hébergeur : sa rétention et ses snapshots sont indépendants de l'application.
+
+## Réglages par destination et playlists
+
+Le formulaire conserve des valeurs communes comme point de départ et propose un bloc pour chaque réseau sélectionné : titre/première ligne, description/légende et date/heure. Les horaires sont saisis dans le fuseau du navigateur, indiqué dans le formulaire ; la file affiche Paris. Chaque adaptateur reçoit les réglages de sa destination. Le MP4 reste partagé et conservé jusqu’à confirmation de toutes les destinations. Le bouton « Modifier les réglages » est disponible tant qu’aucun envoi de cette publication n’a commencé. Les anciennes publications restent compatibles et utilisent leurs valeurs communes.
+
+L’onglet Réglages mémorise les valeurs habituelles (textes, heure, et options YouTube). Elles préremplissent uniquement les nouvelles publications ; elles ne modifient pas les publications déjà programmées. Instagram et TikTok utilisent une légende combinant première ligne et description, sans titre de vidéo séparé.
+
+YouTube : choisir l’audience, la visibilité (publique, non répertoriée ou privée), les tags et une ou plusieurs playlists. Les vidéos publiques peuvent être envoyées en avance avec `publishAt`. Les vidéos privées et non répertoriées sont envoyées au créneau choisi, avec un délai de traitement possible. La gestion des playlists nécessite une nouvelle autorisation Google (`youtube.force-ssl`) depuis Mes réseaux. On peut charger les playlists de la chaîne et en créer (privées par défaut). Une clé de création enregistrée avant l’appel empêche de relancer automatiquement une création ambiguë. Aucun test ne crée de playlist sur la chaîne réelle.
+
+Après traitement YouTube, le classement dans les playlists est confirmé avant de terminer cette destination. Un résultat de classement ambigu garde le fichier et passe en « À vérifier » sans réimporter la vidéo. Vérifier le classement dans YouTube Studio puis confirmer la réception avec le lien. Références : [création de playlists](https://developers.google.com/youtube/v3/docs/playlists/insert), [classement des vidéos](https://developers.google.com/youtube/v3/docs/playlistItems/insert).
 
 ## Connecter les comptes
 
