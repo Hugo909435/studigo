@@ -71,7 +71,7 @@ Créer un projet Google Cloud, activer YouTube Data API v3 et configurer l'écra
 
 ### TikTok via Buffer (optionnel)
 
-Connecter TikTok dans Buffer, puis créer une clé dans Settings → API. Configurer `BUFFER_API_KEY` et `BUFFER_TIKTOK_CHANNEL_ID` sur le serveur. La clé reste privée. Dans chaque nouvelle publication, choisir explicitement le mode manuel ou « Automatique via Buffer » et indiquer si le contenu est généré par IA. Les publications manuelles déjà enregistrées ne changent pas.
+Connecter TikTok dans Buffer, puis créer une clé dans Settings → API. Configurer `BUFFER_API_KEY` et `BUFFER_TIKTOK_CHANNEL_ID` sur le serveur. La clé reste privée. Le lancement centralisé choisit Buffer pour un envoi compatible, ou le navigateur vérifié pour une couverture importée ou des options avancées. Indiquer si le contenu est généré par IA. Les publications manuelles déjà enregistrées conservent leur état jusqu’à une modification explicite.
 
 Au créneau choisi, Studigo transmet une URL MP4 signée valable 24 heures à Buffer. Une acceptation par Buffer ne confirme pas la réception sur TikTok : le fichier reste présent jusqu'au statut `sent`, au mode `automatic` et à un lien vidéo TikTok confirmé pour le bon compte. Les vérifications sont espacées pour limiter la consommation du quota API. Une erreur, un résultat ambigu ou une attente de plus de 24 heures conserve le fichier et demande une vérification manuelle ; aucune nouvelle création n'est tentée automatiquement. Une lecture de statut temporairement indisponible peut être retentée, sans réenvoyer la vidéo. Après réception par toutes les destinations, seule la copie du studio est supprimée ; Buffer applique sa propre rétention. Les musiques natives TikTok nécessitent le mode manuel.
 
@@ -94,6 +94,16 @@ Obtenir un jeton de Page approprié et renseigner `META_PAGE_TOKEN`, `META_PAGE_
 Références : [YouTube upload](https://developers.google.com/youtube/data/guides/using_resumable_upload_protocol), [ressource YouTube videos](https://developers.google.com/youtube/data/docs/reference/videos), [collection officielle Meta Instagram](https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api), [collection officielle Meta Facebook](https://www.postman.com/meta/facebook/documentation/r56bjfd/facebook-api).
 
 ## Héberger sur un sous-domaine
+
+### Préparation commune et agent navigateur
+
+Le formulaire propose une seule vidéo, un titre, une description, une date et une couverture JPEG/PNG communs. Les onglets par réseau permettent de personnaliser ces valeurs, les playlists YouTube/Facebook et les options TikTok disponibles. Les couvertures propres à un réseau remplacent la couverture commune. L’ancien champ de couverture reste compatible pour YouTube uniquement.
+
+« Enregistrer le brouillon » n’envoie rien. « Programmer partout » enregistre la préparation, contrôle chaque destination, puis programme uniquement si toutes les options sélectionnées sont prises en charge. Un blocage garde le brouillon et ne démarre aucun réseau. L’API serveur refait le même contrôle au lancement. Une image importée n’est jamais ignorée ou remplacée par un instant vidéo ; les deux choix simultanés sont refusés.
+
+Le serveur traite les API. Les travaux navigateur sont réservés par l’agent local de l’application, qui utilise les interfaces officielles. Les comptes, leurs capacités et l’horizon d’envoi doivent d’abord être vérifiés dans ces interfaces. Les dates plus lointaines restent dans Studigo jusqu’à l’ouverture de cet horizon. Voir [la procédure de l’agent](deploy/browser-agent.md) pour le transport privé, les réservations, la vérification des preuves et la configuration récurrente. Le dépôt n’active pas lui-même une tâche programmée.
+
+Les états navigateur distinguent attente, préparation, validation finale, programmation distante et livraison. Une réservation expirée devient « à vérifier » ; elle n’est pas rejouée et ne bascule jamais vers Buffer. Les fichiers restent jusqu’à livraison confirmée de toutes les destinations. La préparation et la programmation des comptes natifs ont besoin d’une machine connectée avec l’application disponible. Les limites d’usage de l’agent et les contrôles de connexion des réseaux restent applicables.
 
 Cette application a besoin d'un processus Node permanent et d'un disque persistant. Un hébergement purement statique ou une fonction éphémère ne convient pas. Aucun hébergement ni DNS n'est créé par ce dépôt.
 

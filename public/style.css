@@ -242,3 +242,23 @@ input, select, textarea { accent-color: #171717; }
 .login-art { background: #111; color: #fff; }
 .login-art i { color: #242424; }
 #login-error:not(:empty) { color: #171717; font-weight: 600; }
+.agent-panel{border:1px solid var(--line,#ddd);background:#fff;padding:22px;border-radius:8px;margin:20px 0}
+.agent-panel>p{font-size:12px;color:#666}
+#agent-accounts{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:18px}
+#agent-accounts>div{display:grid;gap:6px;font-size:12px}
+#agent-accounts span{color:#666;line-height:1.6}
+.preflight{padding:22px;margin-top:22px;border:1px solid #bbb;border-radius:8px}
+.preflight-row{display:grid;grid-template-columns:110px 1fr;gap:16px;padding:12px 0;border-top:1px solid #eee;font-size:12px;line-height:1.7}
+.preflight-row.blocked strong:before{content:'! ';font-weight:800}
+.preflight-row.ready strong:before{content:'✓ '}
+.chip.agent_preparing,.chip.agent_submitting{border-style:dotted}
+.chip.remote_scheduled{background:#eee}
+.cover-settings input[type=file]{max-width:100%;font-size:12px}
+.destination-card details{margin:14px 0;font-size:12px}
+.destination-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}
+.destination-tabs button{padding:10px 18px;background:#fff;border:1px solid #ddd;border-radius:6px;font:inherit;font-size:12px;cursor:pointer}
+.destination-tabs button[aria-selected=true]{background:#171717;color:#fff;border-color:#171717}
+.destination-tabs button:disabled{opacity:.35;cursor:default}
+.destination-grid{display:block}
+.destination-card{max-width:none}
+@media(max-width:700px){#agent-accounts{grid-template-columns:1fr}.preflight-row{grid-template-columns:1fr;gap:4px}}

@@ -77,7 +77,28 @@ test('parcours HTTP privé : import, calendrier, confirmation TikTok et suppress
   assert.equal((await request('/api/youtube/playlists','POST',{title:'Quiz',description:'',privacy:'private',requestId:created.id})).status,409);
   assert.equal((await request(`/api/posts/${created.id}/schedule`,'POST',schedule)).status,409);
   const draft=await (await request('/api/posts','POST',{})).json();await coverUpload(draft.id);const bytesBeforeDelete=(await (await request('/api/state')).json()).storage.used;assert.equal((await request(`/api/posts/${draft.id}`,'DELETE')).status,200);assert.equal((await (await request('/api/state')).json()).storage.used,bytesBeforeDelete-image.length);
-  assert.equal((await request('/api/logout','POST',{})).status,200);assert.equal((await request('/api/state')).status,401);
+  // A missing browser capability blocks the whole launch, while drafts and
+  // imported shared/per-network covers remain available without publication.
+  const unified=await (await request('/api/posts','POST',{})).json();
+  await fetch(`${origin}/api/posts/${unified.id}/media`,{method:'PUT',headers:{Cookie:cookie,Origin:origin,'Content-Type':'video/mp4'},body:content});
+  assert.equal((await fetch(`${origin}/api/posts/${unified.id}/cover?network=common`,{method:'PUT',headers:{Cookie:cookie,Origin:origin,'Content-Type':'image/png'},body:image})).status,200);
+  const launch={title:'Une préparation',description:'Même vidéo',scheduledAt:new Date(Date.now()+7200000).toISOString(),networks:['facebook','instagram','tiktok'],deliveryMode:'auto',tiktokAiGenerated:false,destinationSettings:{facebook:{facebookPlaylist:'Les Quiz'}}};
+  let check=await (await request(`/api/posts/${unified.id}/preflight`,'POST',launch)).json();assert.equal(check.ready,false);assert.equal(check.checks.length,3);assert.equal(check.checks[0].route,'browser');
+  assert.equal((await request(`/api/posts/${unified.id}/schedule`,'POST',launch)).status,409);
+  assert.equal((await request(`/api/posts/${unified.id}/draft`,'POST',launch)).status,200);
+  let saved=(await (await request('/api/state')).json()).posts.find(p=>p.id===unified.id);assert.equal(saved.status,'draft');assert.ok(saved.covers.common);assert.ok(!JSON.stringify(saved).includes('-cover-common.png'));
+  assert.equal((await request(`/api/posts/${unified.id}/cover?network=../../private`)).status,400);
+  for(const network of launch.networks)assert.equal((await request('/api/browser/account','POST',{network,id:network+'-quiz',name:'Quiz '+network,features:{schedule:true,customCover:true,playlist:true,aiLabel:true},maxAdvanceDays:28,minAdvanceMinutes:20,evidence:'Options vérifiées dans les interfaces des comptes de test.'})).status,200);
+  check=await (await request(`/api/posts/${unified.id}/preflight`,'POST',launch)).json();assert.equal(check.ready,true);
+  const conflict={...launch,destinationSettings:{instagram:{thumbnailOffset:0}}};assert.equal((await (await request(`/api/posts/${unified.id}/preflight`,'POST',conflict)).json()).ready,false);
+  assert.equal((await request(`/api/posts/${unified.id}/schedule`,'POST',launch)).status,200);
+  const jobs=await (await request('/api/browser/jobs')).json();assert.equal(jobs.jobs.filter(j=>j.postId===unified.id).length,3);
+  const claim=await (await request('/api/browser/claim','POST',{postId:unified.id,network:'facebook'})).json();assert.ok(claim.token);
+  assert.equal((await request(`/api/posts/${unified.id}/draft`,'POST',launch)).status,409);
+  assert.equal((await fetch(`${origin}/api/posts/${unified.id}/cover?network=common`,{method:'PUT',headers:{Cookie:cookie,Origin:origin,'Content-Type':'image/png'},body:image})).status,409);
+  assert.equal((await request('/api/browser/result','POST',{postId:unified.id,network:'facebook',token:claim.token,action:'attention',message:'Option manquante dans le compte.'})).status,200);
+  saved=(await (await request('/api/state')).json()).posts.find(p=>p.id===unified.id);assert.equal(saved.destinations.facebook.state,'attention');assert.equal(saved.hasMedia,true);
+  assert.equal((await request('/api/logout','POST',{})).status,200);assert.equal((await request('/api/state')).status,401);assert.equal((await request('/api/browser/jobs')).status,401);
 });
 
 test('création de playlist : une requête répétée ou ambiguë ne crée jamais de doublon',async t=>{

@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from 'node:process';
 import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { createStore } from './lib/store.mjs';
-import { destinationPlan } from './lib/planning.mjs';
+import { destinationPlan, coverFor } from './lib/planning.mjs';
+import { browserStatus, browserBlockers, saveBrowserAccount, browserJobs, claimBrowserJob, browserResult, recoverBrowserJobs } from './lib/browser-agent.mjs';
 import { createWorker, purgeDelivered } from './lib/worker.mjs';
 import { createProviders, createGoogleClient, vault, jsonFetch, mediaSignature } from './lib/providers.mjs';
 
@@ -41,8 +42,39 @@ const equal=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),creat
 function send(res,status,value) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); }
 async function body(req) { let text=''; for await(const b of req) { text+=b; if(Buffer.byteLength(text)>65536) fail(413,'Requête trop grande'); } try { return JSON.parse(text); } catch { fail(400,'Données invalides'); } }
 function connected() { return { youtube:!!store.setting('google')&&!store.setting('youtubePaused'), facebook:!!(config.bufferKey&&config.bufferFacebook || config.metaToken&&config.pageId), instagram:!!(config.bufferKey&&config.bufferInstagram || config.metaToken&&config.instagramId), tiktok:!!(config.bufferKey&&config.bufferChannel) }; }
-function publicPost(p) { const {media,cover,...rest}=p; return {...rest,hasMedia:!!media,cover:cover?{mime:cover.mime,size:cover.size}:null}; }
+function publicPost(p) { const {media,cover,covers,...rest}=p; const safe=c=>c?{mime:c.mime,size:c.size}:null;return {...rest,hasMedia:!!media,cover:safe(cover),covers:Object.fromEntries(Object.entries(covers || {}).map(([n,c])=>[n,safe(c)]))}; }
 function owned(id) { const p=store.get(id); if(!p) fail(404,'Publication introuvable'); return p; }
+function preparePlans(p,data) {
+  if(!Array.isArray(data.networks)||!data.networks.length||data.networks.some(n=>!['youtube','facebook','instagram','tiktok'].includes(n)))fail(400,'Choisir au moins un réseau');
+  if(data.deliveryMode!==undefined&&data.deliveryMode!=='auto')fail(400,'Mode d’envoi invalide');
+  const tiktokMode=data.tiktokMode || 'manual';if(!['manual','buffer'].includes(tiktokMode))fail(400,'Mode TikTok invalide');
+  const plans={},checks=[],ready=connected();
+  for(const network of [...new Set(data.networks)]) {
+    const input=data.destinationSettings?.[network] ?? {},plan=destinationPlan(network,input,data),issues=[];
+    if(coverFor(p,network)&&plan.thumbnailOffset!==undefined)issues.push('Choisir soit une image importée, soit un instant de la vidéo.');
+    if(network==='tiktok'&&data.deliveryMode==='auto'&&typeof(input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')issues.push('Indiquer si la vidéo TikTok est générée par IA.');
+    const browser=data.deliveryMode==='auto'&&network!=='youtube'&&(!!coverFor(p,network)||!!plan.facebookPlaylist||Object.keys(plan.nativeOptions || {}).length>0);
+    const bufferTarget=network==='facebook'?config.bufferFacebook:network==='instagram'?config.bufferInstagram:config.bufferChannel;
+    let routing;
+    if(browser) {
+      issues.push(...browserBlockers(store,p,network,plan));
+      routing={state:'agent_queued',provider:'browser',accountId:browserStatus(store).accounts[network]?.id};
+    } else if(network==='tiktok'&&data.deliveryMode!=='auto'&&tiktokMode==='manual')routing={state:'manual'};
+    else {
+      if(!ready[network])issues.push('Compte à connecter avant la programmation.');
+      if(network==='tiktok'&&typeof(input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')issues.push('Indiquer si la vidéo TikTok est générée par IA.');
+      if(network==='instagram'&&plan.thumbnailOffset!==undefined&&!(bufferTarget&&config.bufferKey))issues.push('Le choix d’une image de la vidéo nécessite Buffer.');
+      if(network!=='youtube'&&coverFor(p,network))issues.push('L’envoi sélectionné ne prend pas en charge l’image importée. Utiliser le lancement centralisé.');
+      if(network==='facebook'&&plan.facebookPlaylist)issues.push('Le classement en playlist Facebook nécessite le navigateur vérifié.');
+      if(Object.keys(plan.nativeOptions || {}).length)issues.push('Les options avancées nécessitent le lancement centralisé et le navigateur vérifié.');
+      routing=network!=='youtube'&&bufferTarget&&config.bufferKey?{state:'pending',provider:'buffer',channelId:bufferTarget}:{state:'pending'};
+    }
+    if(network==='youtube'&&plan.playlistIds.length&&!google.canManagePlaylists())issues.push('Reconnecter YouTube pour autoriser les playlists.');
+    plans[network]={...plan,...(network==='youtube'&&store.setting('googleChannel')?{youtubeChannelId:store.setting('googleChannel').id}:{}),...routing};
+    checks.push({network,route:routing.provider || (routing.state==='manual'?'manual':'api'),issues,waitingForAgent:routing.provider==='browser'&&!browserStatus(store).online});
+  }
+  return {plans,checks,ready:checks.every(c=>c.issues.length===0)};
+}
 
 // Les états ambigus après un arrêt ne sont jamais relancés automatiquement.
 for(const p of store.list()) for(const d of Object.values(p.destinations)) if(['uploading','publishing'].includes(d.state)) { d.state='attention'; d.error='Serveur redémarré pendant un envoi. Vérifie le réseau et confirme la réception manuellement.'; store.save(p); }
@@ -78,7 +110,14 @@ const server=createServer(async(req,res)=>{
     if(path.startsWith('/api/') || path.startsWith('/auth/')) {
       if(!authenticated) fail(401,'Connexion requise');
       if(req.method==='POST' && path==='/api/logout') { sessions.delete(sid); res.setHeader('Set-Cookie','studio=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'); return send(res,200,{ok:true}); }
-      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),bufferNetworks:{tiktok:!!(config.bufferKey&&config.bufferChannel),facebook:!!(config.bufferKey&&config.bufferFacebook),instagram:!!(config.bufferKey&&config.bufferInstagram)},googleConfigured:!!(config.googleId&&config.googleSecret),youtubeChannel:store.setting('googleChannel') || null,youtubePending:store.setting('googlePending')?.expiresAt>Date.now()?store.setting('googlePending').channel:null,youtubePaused:!!store.setting('youtubePaused'),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
+      if(req.method==='GET' && path==='/api/state') return send(res,200,{posts:store.list().map(publicPost),connections:connected(),browserAgent:browserStatus(store),bufferNetworks:{tiktok:!!(config.bufferKey&&config.bufferChannel),facebook:!!(config.bufferKey&&config.bufferFacebook),instagram:!!(config.bufferKey&&config.bufferInstagram)},googleConfigured:!!(config.googleId&&config.googleSecret),youtubeChannel:store.setting('googleChannel') || null,youtubePending:store.setting('googlePending')?.expiresAt>Date.now()?store.setting('googlePending').channel:null,youtubePaused:!!store.setting('youtubePaused'),youtubePlaylistsEnabled:google.canManagePlaylists(),youtubePlaylists:store.setting('youtubePlaylists') || [],defaults:store.setting('defaults') || {},storage:{used:store.bytes(),limit:maxStorage,maxUpload},timezone:'Europe/Paris'});
+      if(req.method==='POST'&&path==='/api/browser/heartbeat') {const previous=browserStatus(store);store.setting('browserAgent',{accounts:previous.accounts,lastSeenAt:new Date().toISOString()});recoverBrowserJobs(store);return send(res,200,browserStatus(store));}
+      if(req.method==='POST'&&path==='/api/browser/account') return send(res,200,saveBrowserAccount(store,await body(req)));
+      if(req.method==='GET'&&path==='/api/browser/jobs')return send(res,200,{jobs:browserJobs(store)});
+      if(req.method==='POST'&&['/api/browser/claim','/api/browser/result'].includes(path)) {
+        const data=await body(req),p=owned(data.postId);if(locks.has(p.id))fail(409,'Publication occupée');
+        locks.add(p.id);try{const result=path.endsWith('/claim')?claimBrowserJob(store,p,data.network):browserResult(store,p,data.network,data);if(path.endsWith('/result'))await purgeDelivered(store,p);return send(res,200,result);}finally{locks.delete(p.id);}
+      }
       if(req.method==='GET' && path==='/auth/youtube') {
         if(!config.googleId||!config.googleSecret) fail(409,'Configurer les identifiants Google sur le serveur');
         const state=randomBytes(24).toString('hex'); oauthStates.set(state,{sid,expires:Date.now()+600000});
@@ -159,24 +198,29 @@ const server=createServer(async(req,res)=>{
         const p=owned(draftDelete[1]);
         if(p.status!=='draft'||locks.has(p.id)||uploading) fail(409,'Seuls les brouillons sans import en cours peuvent être supprimés');
         if(p.cover) await unlink(join(store.media,p.cover.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});
+        for(const cover of Object.values(p.covers || {}))await unlink(join(store.media,cover.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});
         if(p.media) await unlink(join(store.media,p.media)).catch(e=>{if(e.code!=='ENOENT')throw e;});
         store.remove(p.id); return send(res,200,{ok:true});
       }
-      const match=path.match(/^\/api\/posts\/([a-f0-9-]+)\/(media|cover|preview|schedule|confirm|download|retry)$/);
+      const match=path.match(/^\/api\/posts\/([a-f0-9-]+)\/(media|cover|preview|schedule|preflight|draft|confirm|download|retry)$/);
       if(match) {
         let p=owned(match[1]); const action=match[2];
         if(req.method==='GET' && ['download','preview'].includes(action)) return await streamMedia(req,res,p,action==='download');
         if(action==='cover') {
+          const coverNetwork=url.searchParams.get('network');
+          if(coverNetwork&&!['common','youtube','facebook','instagram','tiktok'].includes(coverNetwork))fail(400,'Destination de couverture invalide');
+          const current=coverNetwork?(url.searchParams.get('effective')==='true'?coverFor(p,coverNetwork):p.covers?.[coverNetwork]):p.cover;
           if(req.method==='GET') {
-            if(!p.cover) fail(404,'Aucune couverture');
-            res.writeHead(200,{'Content-Type':p.cover.mime,'Content-Length':String(p.cover.size)});await pipeline(createReadStream(join(store.media,p.cover.file)),res);return;
+            if(!current) fail(404,'Aucune couverture');
+            res.writeHead(200,{'Content-Type':current.mime,'Content-Length':String(current.size),'Content-Disposition':`attachment; filename="studigo-cover.${current.mime==='image/png'?'png':'jpg'}"`});await pipeline(createReadStream(join(store.media,current.file)),res);return;
           }
           if(!['PUT','DELETE'].includes(req.method)) fail(405,'Méthode refusée');
-          if(!['draft','scheduled'].includes(p.status) || uploading || locks.has(p.id) || Object.values(p.destinations).some(d=>!['pending','manual'].includes(d.state))) fail(409,'La couverture ne peut plus être modifiée après le début des envois');
+          if(!['draft','scheduled'].includes(p.status) || uploading || locks.has(p.id) || Object.values(p.destinations).some(d=>!['pending','manual','agent_queued'].includes(d.state))) fail(409,'La couverture ne peut plus être modifiée après le début des envois');
+          if(p.status==='scheduled')fail(409,'Enregistrer d’abord les réglages en brouillon avant de modifier les couvertures.');
           locks.add(p.id);
           let temporary;
           try {
-            if(req.method==='DELETE') {if(p.cover)await unlink(join(store.media,p.cover.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});p.cover=null;store.save(p);return send(res,200,publicPost(p));}
+            if(req.method==='DELETE') {if(current)await unlink(join(store.media,current.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});if(coverNetwork){p.covers ||= {};delete p.covers[coverNetwork];}else p.cover=null;store.save(p);return send(res,200,publicPost(p));}
             const mime=req.headers['content-type'],size=Number(req.headers['content-length']);
             if(!['image/jpeg','image/png'].includes(mime) || !Number.isSafeInteger(size) || size<24 || size>50*1024*1024) fail(400,'Importer une image JPEG ou PNG de 50 Mo maximum');
             if(store.bytes()+size>maxStorage) fail(413,'Quota de stockage atteint');
@@ -186,8 +230,8 @@ const server=createServer(async(req,res)=>{
             const f=await open(temporary);const header=Buffer.alloc(24);try{await f.read(header,0,24,0);}finally{await f.close();}
             const valid=mime==='image/png'?header.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))&&header.toString('ascii',12,16)==='IHDR'&&header.readUInt32BE(16)>0&&header.readUInt32BE(20)>0:header[0]===255&&header[1]===216&&header[2]===255;
             if(!valid) fail(400,'Le fichier ne correspond pas à une image JPEG ou PNG');
-            const filename=`${p.id}-cover.${mime==='image/png'?'png':'jpg'}`,previous=p.cover;
-            await rename(temporary,join(store.media,filename));p.cover={file:filename,mime,size};store.save(p);
+            const filename=`${p.id}-cover${coverNetwork?'-'+coverNetwork:''}.${mime==='image/png'?'png':'jpg'}`,previous=current;
+            await rename(temporary,join(store.media,filename));if(coverNetwork){p.covers ||= {};p.covers[coverNetwork]={file:filename,mime,size};}else p.cover={file:filename,mime,size};store.save(p);
             if(previous&&previous.file!==filename)await unlink(join(store.media,previous.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});
             return send(res,200,publicPost(p));
           } finally {locks.delete(p.id);if(temporary)await unlink(temporary).catch(()=>{});}
@@ -209,25 +253,14 @@ const server=createServer(async(req,res)=>{
           } finally { uploading=false; await unlink(temporary).catch(()=>{}); }
           return send(res,200,publicPost(p));
         }
-        if(req.method==='POST' && action==='schedule') {
+        if(req.method==='POST' && ['schedule','preflight','draft'].includes(action)) {
           const data=await body(req);p=owned(match[1]);
-          if(!p.media || !['draft','scheduled'].includes(p.status) || locks.has(p.id) || Object.values(p.destinations).some(d=>!['pending','manual'].includes(d.state))) fail(409,'Seules les publications dont aucun envoi n’a commencé peuvent être modifiées');
-          if(!Array.isArray(data.networks)||!data.networks.length||data.networks.some(n=>!['youtube','facebook','instagram','tiktok'].includes(n))) fail(400,'Choisir au moins un réseau');
-          const ready=connected();if(data.networks.some(n=>n!=='tiktok'&&!ready[n])) fail(409,'Configurer les comptes sélectionnés avant la programmation');
-          const tiktokMode=data.tiktokMode || 'manual';
-          if(!['manual','buffer'].includes(tiktokMode)) fail(400,'Mode TikTok invalide');
-          const plans={};
-          for(const network of [...new Set(data.networks)]) {
-            const input=data.destinationSettings?.[network] ?? {};
-            const plan=destinationPlan(network,input,data);
-            if(network==='youtube' && plan.playlistIds.length && !google.canManagePlaylists()) fail(409,'Reconnecter YouTube dans Mes réseaux pour autoriser les playlists');
-            if(network==='tiktok' && tiktokMode==='buffer' && (!ready.tiktok || typeof (input.tiktokAiGenerated ?? data.tiktokAiGenerated)!=='boolean')) fail(409,'Configurer Buffer et indiquer si la vidéo TikTok est générée par IA');
-            const bufferTarget=network==='facebook'?config.bufferFacebook:network==='instagram'?config.bufferInstagram:null;
-            if(network==='instagram' && plan.thumbnailOffset!==undefined && !(bufferTarget&&config.bufferKey)) fail(409,'Le choix de couverture Instagram nécessite la connexion Buffer');
-            plans[network]={...plan,...(network==='youtube'&&store.setting('googleChannel')?{youtubeChannelId:store.setting('googleChannel').id}:{}),...(network==='tiktok'?(tiktokMode==='buffer'?{state:'pending',provider:'buffer',channelId:config.bufferChannel}:{state:'manual'}):bufferTarget&&config.bufferKey?{state:'pending',provider:'buffer',channelId:bufferTarget}:{state:'pending'})};
-          }
+          if(!p.media || !['draft','scheduled'].includes(p.status) || locks.has(p.id) || Object.values(p.destinations).some(d=>!['pending','manual','agent_queued'].includes(d.state))) fail(409,'Seules les publications dont aucun envoi n’a commencé peuvent être modifiées');
+          const prepared=preparePlans(p,data),{plans}=prepared;
+          if(action==='preflight')return send(res,200,{ready:prepared.ready,checks:prepared.checks});
+          if(action==='schedule'&&!prepared.ready)fail(409,prepared.checks.filter(c=>c.issues.length).map(c=>c.network+' : '+c.issues.join(' ')).join(' '));
           const earliest=Object.values(plans).map(d=>d.scheduledAt).sort()[0];
-          p.title=typeof data.title==='string'&&data.title.trim()?data.title.trim().slice(0,100):Object.values(plans)[0].title;p.description=typeof data.description==='string'?data.description:'';p.scheduledAt=earliest;p.madeForKids=plans.youtube?.madeForKids ?? data.madeForKids ?? false;p.tiktokAiGenerated=plans.tiktok?.tiktokAiGenerated ?? false;p.status='scheduled';p.destinations=plans;store.save(p);
+          p.title=typeof data.title==='string'&&data.title.trim()?data.title.trim().slice(0,100):Object.values(plans)[0].title;p.description=typeof data.description==='string'?data.description:'';p.scheduledAt=earliest;p.commonScheduledAt=Number.isFinite(new Date(data.scheduledAt).getTime())?new Date(data.scheduledAt).toISOString():earliest;p.madeForKids=plans.youtube?.madeForKids ?? data.madeForKids ?? false;p.tiktokAiGenerated=plans.tiktok?.tiktokAiGenerated ?? false;p.status=action==='draft'?'draft':'scheduled';p.destinations=plans;p.deliveryMode=data.deliveryMode || null;store.save(p);
           return send(res,200,publicPost(p));
         }
         if(req.method==='POST' && action==='confirm') {
