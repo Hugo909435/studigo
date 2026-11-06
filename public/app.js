@@ -115,10 +115,10 @@ function openComposer(p){
   if(previewUrl){URL.revokeObjectURL(previewUrl);previewUrl=null;}$('#video-preview').hidden=true;if(p?.hasMedia){$('#video-preview').src=`/api/posts/${p.id}/preview`;$('#video-preview').hidden=false;}
   $('#dropzone').hidden=!!p?.hasMedia;$('#file').required=!p?.hasMedia;$('#file-name').textContent=p?.hasMedia?`MP4 déjà importé · ${bytes(p.size)}`:'';
   $('#upload-limit').textContent=`MP4 · ${bytes(state.storage.maxUpload)} maximum · sans copie d’archive`;
-  const defaultDate=new Date(Date.now()+3600000);defaultDate.setMinutes(0);defaultDate.setSeconds(0);defaultDate.setMilliseconds(0);
+  const defaultDate=new Date(Math.ceil((Date.now()+3600000)/3600000)*3600000);
   $('#scheduled-at').value=localDate(p?.commonScheduledAt || p?.scheduledAt || defaultDate);
   $('#time-zone').textContent=`Heure de ton navigateur : ${Intl.DateTimeFormat().resolvedOptions().timeZone}. Le calendrier affiche Paris.`;
-  $('#network-picker').innerHTML=Object.entries(networks).map(([n,label])=>`<label class="network-choice"><span class="network-icon ${n}">${symbols[n]}</span><span>${label}<small>${n==='tiktok'?(state.connections.tiktok?'Envoi centralisé':'Publication manuelle'):state.bufferNetworks?.[n]?'Reel automatique via Buffer':state.connections[n]?'Envoi automatique':'Compte à configurer'}</small></span><input type="checkbox" name="network" value="${n}" ${p?.destinations[n]||!p&&state.connections[n]?'checked':''} ></label>`).join('');
+  $('#network-picker').innerHTML=Object.entries(networks).map(([n,label])=>`<label class="network-choice"><span class="network-icon ${n}">${symbols[n]}</span><span>${label}<small>${n==='tiktok'?(state.connections.tiktok?'Envoi centralisé':'Publication manuelle'):state.browserAgent?.accounts?.[n]?'Compte navigateur vérifié':state.connections[n]?'Compte connecté':'Compte à configurer'}</small></span><input type="checkbox" name="network" value="${n}" ${p?.destinations[n]||!p&&state.connections[n]?'checked':''} ></label>`).join('');
   $('#tiktok-mode').querySelector('[value=buffer]').disabled=!state.connections.tiktok;
   $('#tiktok-mode').value=state.connections.tiktok?'buffer':'manual';
   $('#tiktok-ai').value=p?.destinations.tiktok?.tiktokAiGenerated===undefined?'':String(p.destinations.tiktok.tiktokAiGenerated);
